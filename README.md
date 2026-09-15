@@ -38,8 +38,8 @@ Abre `http://localhost:5180`, permite el acceso a la cámara y colócate frente 
 
 | URL | Qué hace |
 | --- | --- |
-| `/?mock=true` | Siluetas sintéticas: prueba la experiencia sin cámara ni personas |
-| `/?debug=true` | Panel técnico: cámara, máscara, cajas, FPS, inferencia, partículas y estado |
+| `/?mock=true` | Siluetas sintéticas: prueba la experiencia sin cámara ni personas. El guion de 36 s tiene una persona que entra, una segunda y luego una tercera (modo pareja → colectivo) |
+| `/?debug=true` | Panel técnico: cámara, máscara, cajas, FPS, inferencia, partículas, progreso de formación, núcleo/estela/borde, modo de grupo y estado |
 | `/?calibrate=true` | Debug + cámara, máscara, Pose, ROI y controles técnicos persistibles |
 | `/?mock=true&debug=true` | Ambos |
 
@@ -49,6 +49,7 @@ Abre `http://localhost:5180`, permite el acceso a la cámara y colócate frente 
 | --- | --- |
 | `1` | Simula "mano levantada" |
 | `2` | Simula "dos manos arriba" |
+| `3` | Simula "mano levantada" de las dos primeras siluetas a la vez (resonancia de ondas) |
 | `D` | Oculta o muestra el panel |
 | `F` | Pantalla completa (disponible también fuera de debug, o con doble clic) |
 
@@ -73,7 +74,7 @@ Todo vive en [`src/config.ts`](src/config.ts). No hay números mágicos repartid
 | `vision` | FPS independientes de segmentación/Pose, ancho, delegado GPU/CPU, umbrales, suavizado, área mínima, `maxPeople`, watchdog y fallback |
 | `gestures` | Visibilidad, margen, suavizado, histéresis, tiempos mínimos y gracia de ausencia |
 | `proximity` | Qué tamaño aparente cuenta como lejos o cerca |
-| `particles` | Pool y densidad; fases de movimiento (formación, tracking, movimiento rápido, departure); predicción e interpolación; presencia magnética; idle; onda de mano; reveal y vuelo de partículas al texto y a la marca |
+| `particles` | Pool y densidad; fases de movimiento (formación, tracking, movimiento rápido, departure); predicción e interpolación; presencia magnética; idle; onda de mano; reveal y vuelo de partículas al texto y a la marca. Subsecciones `formationWow`, `livingBody` y `groupInteraction` |
 | `layout` | Columnas de espacio negativo para el texto, franja superior, umbral de ocupación e histéresis |
 | `experience` | Tiempos de la narrativa: saludo, instrucciones, `instructionTimeout`, `gestureCooldown`, gracia de ausencia, marca |
 | `texts` | Todos los textos en pantalla |
@@ -104,9 +105,9 @@ Cada partícula del cuerpo usa tiempos distintos según su fase. El panel `?debu
 
 | Fase | Cuándo | Parámetros principales | Carácter |
 | --- | --- | --- | --- |
-| **INITIAL FORMATION** | La persona acaba de llegar | `particleAttraction` 0.16, `particleDamping` 0.6, `formationDuration` 780 ms, `formationMaxSpeed` 26 | Lenta y cinematográfica: el campo es atraído y se concentra en el cuerpo |
+| **INITIAL FORMATION** | La persona acaba de llegar | `particleAttraction` 0.16, `particleDamping` 0.6, `formationDuration` 660 ms, `formationStagger` 0.4, `formationMaxSpeed` 26, `formationWow.*` | Anticipación → colapso → lock (ver *Formation WOW*) |
 | **NORMAL TRACKING** | Cuerpo formado (`bond` > `trackingBondThreshold`) | `trackingAttraction` 0.5, `trackingDamping` 0.42, `trackingSnap` 0.32, `maxSpeed` 64 | Espejo: resorte firme + acercamiento directo sin overshoot |
-| **FAST MOTION** | Track rápido (`fastMotionSpeed` 90→700 px/s) o transporte reciente (`trackingResponseMs` 120 ms) | `fastMotionAttraction` 0.7, `fastMotionDamping` 0.34, `fastMotionSnap` 0.5, estela `fastMotionTrailRatio` 12 % | Centro pegado al cuerpo con una estela muy leve |
+| **FAST MOTION** | Track rápido (`fastMotionSpeed` 90→700 px/s) o transporte reciente (`trackingResponseMs` 120 ms) | `fastMotionAttraction` 0.7, `fastMotionDamping` 0.34, `fastMotionSnap` 0.5 | Todo el núcleo pegado al cuerpo; la estela es visual (`livingBody`) |
 | **DEPARTURE** | El track desapareció | `occlusionGraceMs` 120, `departureLetGoMs` 70, `departureStaggerMs` 480, `dispersionDuration` 1750 | Momentum → desprendimiento escalonado → dispersión → campo |
 
 **Caminar.** Cuando la silueta se traslada, toda la propiedad de celdas se desplaza a la vez: cada partícula recorre sólo el movimiento real del cuerpo, en lugar de cruzar del borde trasero al delantero. La traslación se mide con los bordes de la silueta, así que levantar o extender un brazo no la dispara. Medido a 540 px/s: lag medio de 24.6 px → 5.0 px y peor partícula de 101 px → 5 px, sin overshoot al detenerse.
@@ -124,6 +125,41 @@ Cada partícula del cuerpo usa tiempos distintos según su fase. El panel `?debu
 4. Si el contorno deja una estela, bajar `vision.smoothingReleaseMs` hacia 50–60 ms; si parpadea, subirlo hacia 75–90 ms.
 5. Si los brazos rápidos se quedan atrás, subir `fastMotionSnap` o `trackingResponseMs`.
 6. Verificar motion-to-photon con video externo: `pipeline` mide captura → resultado y no incluye pantalla ni cámara físicas.
+
+### Formation WOW
+
+La formación de cada persona (por `personId` temporal, así una segunda persona también tiene su entrada) sigue tres fases sobre el sistema existente:
+
+1. **Anticipation.** En cuanto el segmentador ve una silueta aún no confirmada, el campo cercano ya se curva hacia ella (`pendingAttraction`, `anticipationCurl`) y brilla levemente. Al confirmarse, la atracción sube (`anticipationBoost`).
+2. **Collapse.** Las partículas convergen en arco (`collapseCurl`) con un retraso que mezcla azar y distancia al centro del cuerpo (`radialStagger`): el torso se reconoce antes que las extremidades. Mientras esperan su turno ya se acercan (`waitingAttraction`) y brillan a mitad de viaje (`collapseGlow`).
+3. **Lock.** Cuando `lockThreshold` (80 %) del cuerpo está formado, el resto acelera (`lockSpeedup`), hay un pulso breve (`lockGlow`) y el giro del campo se apaga (`curlReleaseMs`). A partir de ahí las celdas nuevas casi no esperan (`lockedStaggerScale`): la silueta crece como espejo.
+
+El target es siempre la celda actual: si la persona entra caminando, las partículas convergen hacia donde está, no hacia donde fue detectada. Medido en simulación a 1920×1080: lock a ~780 ms desde el campo ambiental.
+
+### Living body
+
+El núcleo sigue su target exactamente igual que antes; encima se aplica un **offset visual** que nunca modifica la celda, el target ni la posición física. Una prueba verifica que las posiciones del núcleo son idénticas con y sin efectos.
+
+- **Microestela** (`trailRatioEdge` 30 % del borde, `trailRatioInterior` 3 % del interior): con velocidad local alta (`trailSpeed` 220→1000 px/s), la partícula conserva `trailInertia` de su posición en el mundo y regresa en ~`trailDurationMs` (200 ms), con tope `trailMaxDistance`.
+- **Desprendimiento de borde** (`shedRatio` 14 % del borde): además se abre en arco (`shedForce`, `shedDurationMs`, `shedMaxDistance`) y vuelve al cuerpo. No se convierte en partícula ambiental ni resta densidad.
+- **Cuerpo quieto**: el temblor ahora es visual; el interior casi no se mueve (`interiorNoise`) y el borde flota lento (`edgeFloat`, `edgeFloatSpeed`).
+- En total, alrededor del 90 % del cuerpo queda como núcleo espejo. Al volver al campo, el offset se integra a la posición y no hay saltos.
+
+### Group mode
+
+`GroupInteraction` es lógica pura y determinista. Usa sólo los `personId` temporales, sin identidad persistente.
+
+| Personas estables (`stableMs`, `dropGraceMs`) | Modo | Qué se ve |
+| --- | --- | --- |
+| 1 | single | Comportamiento normal |
+| 2 | pair | Una corriente curva y sutil de partículas del campo entre ambas (`pairStrength`, `pairParticleBudget`) |
+| 3+ | collective | Hasta `maxConnections` corrientes (primero conecta a todos y luego agrega los pares más cercanos), pequeños nodos que giran (`nodeRatio`) y el campo completo más activo (`collectiveAmbientDrift`, `collectiveTwinkle`) |
+
+- **Sin saltos.** El modo cambia con histéresis (`enterMs`, `exitMs`). Cada conexión conserva su lugar mientras exista su par, su fuerza sube y baja con `strengthAttackMs`/`strengthReleaseMs`, sus extremos siguen a las personas con `positionSmoothingMs` y un par ya conectado se prefiere al elegir (`selectionStickiness`).
+- **Proximidad.** La fuerza va de plena a cero entre `connectionDistance.near` y `.far`, sin un switch duro. El movimiento relativo del par acelera la corriente (`relativeSpeedBoost`).
+- **Presupuesto.** Sólo se reclutan partículas ambientales cercanas a la corriente, con un barrido acotado por frame (`recruitScanPerFrame`). Si faltan, aparecen unas pocas (`spawnPerFrame`). Los cuerpos nunca ceden partículas y la población ambiental no las cuenta.
+- **Resonancia.** Si dos personas hacen ONE_HAND_UP dentro de `resonanceWindowMs` (700 ms) con el grupo activo, las ondas se encuentran a mitad de camino: brillo breve, dispersión controlada del campo y un pequeño pulso de partículas. Sin texto. El cooldown de gestos ahora es por persona.
+- `?particles.groupInteraction.enabled=false` desactiva todo el modo.
 
 ### Texto en el espacio negativo
 
@@ -226,7 +262,9 @@ src/
     protocol.ts, types.ts   contratos
   particles/
     TargetField.ts          máscara → retícula estable en pantalla
-    ParticleSystem.ts       física, formación, dispersión, ondas
+    ParticleSystem.ts       física, formación, dispersión, ondas, offset vivo, corrientes
+    FormationTracker.ts     formación por persona: inicio, progreso y lock
+    GroupInteraction.ts     personas estables, modo, pares, fuerza y presupuesto (puro)
     FlowField.ts            campo de ruido orgánico para el ambiente
   render/
     Renderer.ts             WebGL2, un draw call de puntos
@@ -234,6 +272,7 @@ src/
     GestureEvents.ts        contrato de gestos
     GestureRecognizer.ts    landmarks → flancos ONE_HAND_UP/BOTH_HANDS_UP
     InteractionManager.ts   gesto → reacción visual + narrativa
+    GestureResonance.ts     ONE_HAND_UP casi simultáneo de dos personas
   ui/
     InstructionOverlay.ts   mensajes con prioridad, timeout y fundido
     BrandOverlay.ts
@@ -260,7 +299,7 @@ src/
 | Estado | Pantalla |
 | --- | --- |
 | **IDLE** | Campo lento con profundidad (cada partícula tiene tamaño, brillo y deriva según su profundidad). "ACÉRCATE" aparece y se desvanece cada `idlePromptIntervalMs`. Aviso de privacidad periódico. |
-| **PRESENCE** | El campo es atraído y forma la silueta. "TÚ ERES EL INPUT" → "LEVANTA UNA MANO" → "AHORA PRUEBA CON LAS DOS" → "COMPUTER VISION" → marca. Después, modo libre: sin instrucciones y con los gestos activos. El campo cercano reacciona muy sutilmente al movimiento. |
+| **PRESENCE** | El campo nota la presencia, converge y forma la silueta (anticipación → colapso → lock). Con dos o más personas, el espacio entre ellas se activa (Group mode). "TÚ ERES EL INPUT" → "LEVANTA UNA MANO" → "AHORA PRUEBA CON LAS DOS" → "COMPUTER VISION" → marca. Después, modo libre: sin instrucciones y con los gestos activos. El campo cercano reacciona muy sutilmente al movimiento. |
 | **DEPARTURE** | Momentum → desprendimiento escalonado → dispersión → campo ambiental. Si hubo interacción, aparece la marca al centro. Luego vuelve a IDLE. |
 
 Pérdidas breves de detección (menos de 900 ms) no cuentan como salida. Si la persona regresa en menos de 8 s, la secuencia continúa sin repetir el saludo.
@@ -285,7 +324,7 @@ Pérdidas breves de detección (menos de 900 ms) no cuentan como salida. Si la p
 
 ## Verificación
 
-`npm test` (27 pruebas), `npm run typecheck` y `npm run build` validan lógica pura, contratos TypeScript y bundle de producción. Las pruebas cubren, entre otras cosas, la traslación de la silueta al caminar sin overshoot, la predicción ante brazos/frenado/giro, el departure escalonado, el reveal sin pérdida de tracking y la elección de espacio negativo. La medición motion-to-photon sigue siendo una prueba física externa con video de alta velocidad.
+`npm test` (51 pruebas), `npm run typecheck` y `npm run build` validan lógica pura, contratos TypeScript y bundle de producción. Las pruebas cubren, entre otras cosas, la traslación de la silueta al caminar sin overshoot, la predicción ante brazos/frenado/giro, el departure escalonado, el reveal sin pérdida de tracking, la elección de espacio negativo, el lock de formación por persona, que la estela visual no altere el núcleo espejo, la histéresis y selección de pares del modo grupo, los presupuestos de partículas y la resonancia de gestos. La medición motion-to-photon sigue siendo una prueba física externa con video de alta velocidad.
 
 ## Créditos y licencias
 
