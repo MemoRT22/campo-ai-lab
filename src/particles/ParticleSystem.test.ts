@@ -267,4 +267,57 @@ describe('ParticleSystem temporal transport', () => {
     expect(system.releasedLastFrame).toBe(bodyCount);
     expect(Array.from(internals(system).mode).filter((mode) => mode === BODY)).toHaveLength(0);
   });
+
+  it('al irse una persona la silueta conserva forma y momentum y se desprende de forma escalonada', () => {
+    const config = structuredClone(defaultConfig);
+    config.camera.mirror = false;
+    config.camera.fit = 'contain';
+    config.particles.particleCount = 300;
+    config.particles.bodyParticleBudget = 300;
+    config.particles.idleParticleCount = 0;
+    config.particles.particleDensity = { far: 1, close: 1 };
+    const field = new TargetField(config);
+    const system = new ParticleSystem(config.particles);
+    field.resize(200, 100);
+    system.resize(200, 100);
+
+    field.update(visionFrame(4), 1000);
+    system.applyTargets(field, 1000);
+    const bodyCount = system.formedLastFrame;
+    const state = internals(system);
+    for (let p = 0; p < system.capacity; p++) {
+      state.vx[p] = 0;
+      state.vy[p] = 0;
+    }
+
+    const departureAt = 1000 + config.particles.occlusionGraceMs + 1;
+    field.update(visionFrame(null), departureAt);
+    system.applyTargets(field, departureAt);
+    expect(system.releasedLastFrame).toBe(bodyCount);
+
+    const snapshotX = Array.from(state.px);
+    const snapshotY = Array.from(state.py);
+    system.step(1 / 60, departureAt + 16);
+    const initiallyDetaching = system.detachingCount;
+    expect(initiallyDetaching).toBeGreaterThan(bodyCount * 0.5);
+    const detachAt = (state as unknown as { detachAt: Float64Array }).detachAt;
+    let checked = 0;
+    for (let p = 0; p < system.capacity; p++) {
+      const visible = snapshotX[p] >= 0 && snapshotX[p] <= 200 && snapshotY[p] >= 0 && snapshotY[p] <= 100;
+      // Una partícula que aún no se desprende no recibe flujo, ruido ni impulso.
+      if (visible && state.mode[p] !== BODY && detachAt[p] > 0) {
+        expect(state.px[p]).toBeCloseTo(snapshotX[p], 5);
+        expect(state.py[p]).toBeCloseTo(snapshotY[p], 5);
+        checked++;
+      }
+    }
+    expect(checked).toBeGreaterThan(0);
+
+    system.step(1 / 60, departureAt + config.particles.departureStaggerMs * 0.5);
+    expect(system.detachingCount).toBeGreaterThan(0);
+    expect(system.detachingCount).toBeLessThan(initiallyDetaching);
+
+    system.step(1 / 60, departureAt + config.particles.departureStaggerMs + 20);
+    expect(system.detachingCount).toBe(0);
+  });
 });

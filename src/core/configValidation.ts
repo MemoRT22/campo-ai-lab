@@ -82,6 +82,22 @@ const NUMBER_RULES: Record<string, NumberRule> = {
   'proximity.closeSize': { min: 0, max: 2 },
   'experience.gestureCooldown': { min: 0, max: 10000 },
   'experience.idlePromptDurationMs': { min: 500, max: 30000 },
+  'experience.idlePromptIntervalMs': { min: 1000, max: 600000 },
+  'particles.formationAttractionRadius': { min: 0, max: 3000 },
+  'particles.formationAttractionInnerRadius': { min: 1, max: 1000 },
+  'particles.formationAttractionWindowMs': { min: 0, max: 30000 },
+  'particles.formationAttractionFadeMs': { min: 1, max: 30000 },
+  'particles.formationSearchRings': { min: 1, max: 16, integer: true },
+  'particles.formationAnticipationGlow': { min: 0, max: 3 },
+  'particles.departureStaggerMs': { min: 0, max: 800 },
+  'particles.departureCohesionDamping': { min: 0.5, max: 0.999 },
+  'particles.magneticResidualAttraction': { min: 0, max: 1 },
+  'particles.magneticRadius': { min: 1, max: 2000 },
+  'particles.magneticDeflection': { min: 0, max: 1 },
+  'particles.idleTwinkle': { min: 0, max: 1 },
+  'particles.ambientCohesionRadius': { min: 1, max: 3000 },
+  'particles.idleWellSpeed': { min: 0, max: 2 },
+  'particles.idleWellWander': { min: 0, max: 0.4 },
 };
 
 function get(root: object, path: string): unknown {

@@ -146,13 +146,14 @@ body.cursor-hidden * {
   font-weight: 300;
 }
 
-.instruction[data-variant='prompt'][data-visible='true'] {
-  animation: breathe 6200ms ease-in-out 1200ms infinite;
+/* La respiración vive en el texto y el fundido en el contenedor: nunca se interrumpen entre sí. */
+.instruction[data-variant='prompt'] .instruction__message {
+  animation: breathe 6200ms ease-in-out infinite;
 }
 
 @keyframes breathe {
-  0%, 100% { opacity: var(--instruction-opacity, 0.8); }
-  50% { opacity: calc(var(--instruction-opacity, 0.8) * 0.45); }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 .instruction[data-variant='title'] {

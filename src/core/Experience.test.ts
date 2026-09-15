@@ -60,4 +60,13 @@ describe('Experience', () => {
     experience.update(10_000, 1);
     expect(overlay.shown.filter((id) => id === 'raise-hand')).toHaveLength(1);
   });
+
+  it('ACÉRCATE reaparece periódicamente mientras nadie está presente', () => {
+    const config = structuredClone(defaultConfig);
+    const overlay = new OverlaySpy();
+    const experience = new Experience(config, overlay, new BrandSpy(), new PrivacySpy(), 0);
+    const { idlePromptDelayMs, idlePromptIntervalMs } = config.experience;
+    for (let t = 0; t <= idlePromptDelayMs + idlePromptIntervalMs * 2 + 100; t += 100) experience.update(t, 0);
+    expect(overlay.shown.filter((id) => id === 'idle-prompt')).toHaveLength(3);
+  });
 });

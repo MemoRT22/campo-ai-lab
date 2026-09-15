@@ -113,7 +113,7 @@ export const defaultConfig = {
     /** Fracción de celdas ocupadas según proximidad. */
     particleDensity: { far: 0.75, close: 1 },
     particleSize: { idle: 1.7, far: 2.5, close: 2.9 },
-    particleOpacity: { idle: 0.28, far: 0.68, close: 0.95 },
+    particleOpacity: { idle: 0.34, far: 0.68, close: 0.95 },
     /** Desorden dentro de cada celda (0 = retícula perfecta). */
     cellJitter: 0.8,
     /** Amplitud del temblor vivo de cada partícula sobre el cuerpo (px). */
@@ -126,7 +126,17 @@ export const defaultConfig = {
     /** Retraso aleatorio de formación (fracción de formationDuration). */
     formationStagger: 0.34,
     formationMaxSpeed: 26,
-    spawnDistance: { min: 32, max: 210 },
+    /** Las partículas nuevas aparecen lejos del cuerpo y viajan hacia él: se ven llegar, no encenderse. */
+    spawnDistance: { min: 70, max: 300 },
+    /** Atracción del campo hacia una persona que acaba de llegar (px de referencia y ms). */
+    formationAttractionRadius: 440,
+    formationAttractionInnerRadius: 160,
+    formationAttractionWindowMs: 2600,
+    formationAttractionFadeMs: 2000,
+    /** Anillos de bins (64 px) en los que se buscan partículas ambientales para formar el cuerpo. */
+    formationSearchRings: 6,
+    /** Brillo extra de las partículas del campo mientras son atraídas (anticipación). */
+    formationAnticipationGlow: 0.45,
 
     /* NORMAL TRACKING — cuerpo ya formado: debe sentirse como espejo. */
     /** Fracción de `bond` desde la que una partícula usa el perfil de seguimiento. */
@@ -177,6 +187,12 @@ export const defaultConfig = {
     occlusionGraceMs: 120,
     /** Durante esa gracia la partícula suelta su target en este tiempo y sigue con su momentum. */
     departureLetGoMs: 70,
+    /**
+     * Al irse una persona, cada partícula conserva forma y momentum un tiempo distinto (0..este valor)
+     * antes de desprenderse: la silueta se disuelve de forma progresiva, no de golpe.
+     */
+    departureStaggerMs: 480,
+    departureCohesionDamping: 0.985,
     dispersionDuration: 1750,
     releaseKick: 1.8,
     /** Fracción de partículas ambientales que se conservan mientras hay personas. */
@@ -184,10 +200,26 @@ export const defaultConfig = {
     ambientDrift: 0.009,
     ambientDamping: 0.968,
     ambientBrownian: 0.01,
+    /** Fuerza de atracción del campo durante la formación. */
     ambientAttraction: 0.008,
-    /** Influencia sutil del movimiento corporal y cohesión del campo en idle. */
+
+    /* Presencia magnética — el campo reacciona apenas al cuerpo ya formado. */
+    /** Atracción que queda tras la ventana de formación (fracción de ambientAttraction). */
+    magneticResidualAttraction: 0.2,
+    magneticRadius: 280,
+    /** Arrastre del campo detrás del movimiento corporal. */
     ambientMotionInfluence: 0.08,
+    /** Desvío lateral de las partículas que quedan delante del movimiento. */
+    magneticDeflection: 0.05,
+
+    /* IDLE — campo lento con profundidad. Cada partícula tiene una profundidad fija (0 lejos, 1 cerca). */
+    idleDepth: { sizeFar: 0.55, sizeNear: 1.45, alphaFar: 0.4, alphaNear: 1, driftFar: 0.5, driftNear: 1.35 },
+    idleTwinkle: 0.22,
     ambientCohesion: 0.000018,
+    ambientCohesionRadius: 360,
+    /** Velocidad y deriva de los tres pozos lentos que dan respiración al campo. */
+    idleWellSpeed: 0.08,
+    idleWellWander: 0.06,
     breathingAmount: 0.055,
     /** Brillo extra del contorno para reforzar el reconocimiento de la silueta. */
     edgeBrightness: 1.28,
@@ -213,6 +245,8 @@ export const defaultConfig = {
     showDetectedMessage: true,
     idlePromptDelayMs: 2000,
     idlePromptDurationMs: 5200,
+    /** Tiempo entre apariciones de ACÉRCATE mientras nadie está presente. */
+    idlePromptIntervalMs: 15000,
     greetingDelayMs: 700,
     greetingDurationMs: 1800,
     firstInstructionDelayMs: 4300,

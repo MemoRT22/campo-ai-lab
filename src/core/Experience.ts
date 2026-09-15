@@ -58,7 +58,7 @@ export class Experience {
   private readonly machine: StateMachine<ExperienceState>;
   private people = 0;
   private absentSince = -1;
-  private idlePromptShown = false;
+  private nextIdlePromptAt = 0;
   private session: Session | null = null;
   private lastDepartureAt = -Infinity;
 
@@ -72,10 +72,10 @@ export class Experience {
     this.machine = new StateMachine<ExperienceState>(
       {
         idle: {
-          enter: () => {
-            this.idlePromptShown = false;
+          enter: (t) => {
+            this.nextIdlePromptAt = t + this.config.experience.idlePromptDelayMs;
           },
-          update: (t, elapsed) => this.updateIdle(t, elapsed),
+          update: (t) => this.updateIdle(t),
           exit: (t) => this.overlay.hide(ID.idle, t),
         },
         presence: {
@@ -140,13 +140,14 @@ export class Experience {
     }
   }
 
-  private updateIdle(now: number, elapsed: number): void {
+  private updateIdle(now: number): void {
     if (this.people > 0) {
       this.machine.transition('presence', now);
       return;
     }
-    if (!this.idlePromptShown && elapsed > this.config.experience.idlePromptDelayMs) {
-      this.idlePromptShown = true;
+    // ACÉRCATE respira: aparece, se desvanece y vuelve después de un silencio.
+    if (now >= this.nextIdlePromptAt) {
+      this.nextIdlePromptAt = now + this.config.experience.idlePromptIntervalMs;
       this.overlay.show(
         {
           id: ID.idle,
