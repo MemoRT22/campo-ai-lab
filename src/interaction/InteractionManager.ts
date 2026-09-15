@@ -28,10 +28,11 @@ export class InteractionManager {
     this.lastGesture = event;
 
     if (event.type === 'ONE_HAND_UP') {
-      for (const point of event.points) this.waveAt(point, now, 1);
+      for (const point of event.points) this.waveAt(point, event.personId, now, 1);
     } else {
-      this.particles.celebrate(now, this.config.experience.revealScatterMs, 3);
-      for (const point of event.points) this.waveAt(point, now, 1.4);
+      const { revealExpandMs, revealSuspendMs, revealRecoverMs } = this.config.particles;
+      this.particles.celebrate(now, revealExpandMs + revealSuspendMs + revealRecoverMs, 3);
+      for (const point of event.points) this.waveAt(point, event.personId, now, 1.4);
     }
     this.experience.onGesture(event, now);
     return true;
@@ -54,8 +55,8 @@ export class InteractionManager {
     this.handle({ type, personId: person ? person.id : -1, points, timestamp: now, confidence: 1, source: 'simulated' }, now);
   }
 
-  private waveAt(point: GesturePoint, now: number, strength: number): void {
+  private waveAt(point: GesturePoint, personId: number, now: number, strength: number): void {
     const screen = this.field.cameraToScreen(point.x, point.y, this.screenPoint);
-    this.particles.emitWave(screen.x, screen.y, now, strength);
+    this.particles.emitWave(screen.x, screen.y, now, strength, personId);
   }
 }

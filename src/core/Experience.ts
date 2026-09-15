@@ -135,6 +135,7 @@ export class Experience {
           timeout: experience.revealDurationMs,
           priority: PRIORITY.reveal,
           opacity: 0.92,
+          appearAt: now + experience.revealTextDelayMs,
         },
         now,
       );
@@ -224,7 +225,9 @@ export class Experience {
     }
 
     if (branding.showBranding && !session.brandShown) {
-      const afterReveal = session.revealAt >= 0 && now - session.revealAt > experience.revealDurationMs + experience.brandAfterRevealMs;
+      // La marca espera a que el reveal empiece a desvanecerse: nunca comparten espacio al mismo tiempo.
+      const afterReveal = session.revealAt >= 0 && now - session.revealAt > experience.revealDurationMs + experience.brandAfterRevealMs &&
+        this.overlay.activeId !== ID.reveal;
       const afterLongStay = t > experience.brandAfterPresenceMs && this.overlay.activeId === null;
       if (afterReveal || afterLongStay) {
         session.brandShown = true;

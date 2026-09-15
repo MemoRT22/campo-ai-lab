@@ -1,4 +1,5 @@
 import type { TextAnchor, TextKind } from './NegativeSpaceLayout';
+import { linesOf, revealBlock } from './TextParticleSampler';
 
 /** `auto` busca espacio negativo junto a las siluetas en el momento de mostrarse. */
 export type InstructionPlacement = 'center' | 'lower' | 'auto';
@@ -20,6 +21,8 @@ export interface InstructionMessage {
   /** Un mensaje de mayor prioridad no puede ser reemplazado por uno de menor. */
   priority?: number;
   opacity?: number;
+  /** Momento (performance.now()) en que debe empezar a aparecer; el fundido espera hasta entonces. */
+  appearAt?: number;
 }
 
 const FADE_MS = 950;
@@ -49,7 +52,11 @@ export class InstructionOverlay {
   private pending: InstructionMessage | null = null;
   private fadeCompleteAt = 0;
 
-  constructor(root: HTMLElement, private readonly resolvePlacement: PlacementResolver | null = null) {
+  constructor(
+    root: HTMLElement,
+    private readonly resolvePlacement: PlacementResolver | null = null,
+    private readonly typographyScale = 1,
+  ) {
     this.el = document.createElement('div');
     this.el.className = 'instruction';
     this.el.dataset.visible = 'false';
@@ -128,9 +135,31 @@ export class InstructionOverlay {
     }
     this.el.dataset.variant = message.variant ?? 'instruction';
     this.el.style.setProperty('--instruction-opacity', String(message.opacity ?? 0.8));
+    this.el.style.setProperty('--appear-delay', `${Math.max(0, (message.appearAt ?? now) - now)}ms`);
+    if (anchor && message.variant === 'title') {
+      // Los cortes de línea salen del mismo cálculo que usan las partículas del reveal.
+      const block = revealBlock(message.message, message.subMessage ?? '', anchor.width, {
+        width: window.innerWidth,
+        height: window.innerHeight,
+        typographyScale: this.typographyScale,
+      });
+      renderLines(this.messageEl, linesOf(block, 'title'));
+      renderLines(this.subEl, linesOf(block, 'subtitle'));
+    }
     // Fuerza un reflow para que la transición parta del estado oculto aunque el texto acabe de cambiar.
     void this.el.offsetWidth;
     this.el.dataset.visible = 'true';
     this.onRender?.(message, anchor, now);
   }
+}
+
+export function renderLines(element: HTMLElement, lines: string[]): void {
+  element.replaceChildren(
+    ...lines.map((text) => {
+      const line = document.createElement('span');
+      line.className = 'type-line';
+      line.textContent = text;
+      return line;
+    }),
+  );
 }

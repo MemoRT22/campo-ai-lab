@@ -89,6 +89,13 @@ body.cursor-hidden * {
   --tracking: 0.4em;
   opacity: var(--instruction-opacity, 0.8);
   filter: blur(0);
+  /* Sólo al aparecer: el reveal espera la suspensión de la silueta. Al ocultarse no hay retraso. */
+  transition-delay: var(--appear-delay, 0ms);
+}
+
+.type-line {
+  display: block;
+  white-space: nowrap;
 }
 
 .instruction[data-placement='center'] {
@@ -198,6 +205,7 @@ body.cursor-hidden * {
 
 .instruction[data-variant='title'][data-visible='true'] .instruction__message {
   clip-path: inset(0 0 0 0);
+  transition-delay: var(--appear-delay, 0ms);
 }
 
 .instruction[data-variant='title'] .instruction__sub {
@@ -209,6 +217,11 @@ body.cursor-hidden * {
 .instruction[data-variant='title'][data-visible='true'] .instruction__sub {
   opacity: 0.52;
   translate: 0 0;
+  transition-delay: calc(var(--appear-delay, 0ms) + 650ms), calc(var(--appear-delay, 0ms) + 450ms);
+}
+
+.instruction[data-variant='title'] .instruction__sub .type-line {
+  line-height: 1.2;
 }
 
 /* ── Marca ─────────────────────────────────────────────────── */
@@ -298,6 +311,10 @@ body.cursor-hidden * {
 
 .brand[data-visible='true'] .brand__rule {
   transform: scaleX(1);
+}
+
+.brand .type-line {
+  line-height: 1.2;
 }
 
 .brand__tagline {

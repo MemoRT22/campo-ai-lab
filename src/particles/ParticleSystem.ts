@@ -13,20 +13,20 @@ export const RENDER_STRIDE = 4;
 const FRAME_MS = 1000 / 60;
 const BIN_SIZE = 64;
 const MAX_WAVES = 6;
-const WAVE_LIFETIME_MS = 950;
-/**
- * Las partículas libres casi no tienen fricción: si la onda las empuja con la misma fuerza
- * que al cuerpo, viajan con el frente y dibujan un anillo geométrico. Sólo se rozan.
- */
-const WAVE_AMBIENT_FACTOR = 0.12;
-const EXCITE_SIZE = 0.9;
-const EXCITE_ALPHA = 0.22;
-const EXCITE_DECAY_MS = 650;
 const GLOW_SMOOTHING_MS = 120;
+/** Enlace mínimo para que una partícula del cuerpo pueda viajar al texto. */
+const TEXT_MIN_BOND = 0.72;
 const IDLE_FADE_IN_MS = 2600;
 const POPULATION_INTERVAL_MS = 200;
 const WRAP_MARGIN = 24;
-const TEXT_PARTICLE_RATIO = 0.065;
+
+export interface TextFlightTiming {
+  /** Momento en que empieza el viaje (puede esperar a la suspensión de la silueta). */
+  startAt: number;
+  travelMs: number;
+  holdMs: number;
+  returnMs: number;
+}
 
 type ParticleSettings = Config['particles'];
 
@@ -95,7 +95,11 @@ export class ParticleSystem {
   private readonly personFastBlend = new Float32Array(8);
   private readonly personInterpolationX = new Float32Array(8);
   private readonly personInterpolationY = new Float32Array(8);
+  /** Índice de la partícula dentro del grupo que viaja al texto; -1 si no participa. */
   private readonly revealTarget: Int32Array;
+  /** Posición de partida cuando un vuelo continúa desde el texto anterior (reveal → marca). */
+  private readonly flightFrom: Float32Array;
+  private readonly flightUsesFrom: Uint8Array;
   private dormantTop = 0;
 
   private field: TargetField | null = null;
@@ -122,6 +126,12 @@ export class ParticleSystem {
   private readonly waveY = new Float32Array(MAX_WAVES);
   private readonly waveStart = new Float64Array(MAX_WAVES).fill(-Infinity);
   private readonly waveStrength = new Float32Array(MAX_WAVES);
+  /** La onda se ancla a la persona que hizo el gesto: si camina, la onda la acompaña. */
+  private readonly wavePersonId = new Int32Array(MAX_WAVES).fill(-1);
+  private readonly waveOffsetX = new Float32Array(MAX_WAVES);
+  private readonly waveOffsetY = new Float32Array(MAX_WAVES);
+  private readonly waveOriginX = new Float32Array(MAX_WAVES);
+  private readonly waveOriginY = new Float32Array(MAX_WAVES);
   private waveCursor = 0;
   private lastWaveAt = -Infinity;
   private celebrationStart = -Infinity;
@@ -129,6 +139,11 @@ export class ParticleSystem {
   private celebrationStrength = 0;
   private revealTargets = new Float32Array(0);
   private revealTargetCount = 0;
+  private flightActive = false;
+  private flightStart = 0;
+  private flightTravel = 1;
+  private flightHold = 0;
+  private flightReturn = 1;
 
   constructor(private readonly settings: ParticleSettings) {
     const n = settings.particleCount;
@@ -159,6 +174,8 @@ export class ParticleSystem {
     this.transportCandidates = new Int32Array(n);
     this.shiftState = new Uint8Array(n);
     this.revealTarget = new Int32Array(n).fill(-1);
+    this.flightFrom = new Float32Array(n * 2);
+    this.flightUsesFrom = new Uint8Array(n);
     this.binItems = new Int32Array(n);
 
     const jitter = settings.cellJitter * 0.5;
@@ -175,10 +192,41 @@ export class ParticleSystem {
     return this.dormantTop;
   }
 
-  /** Targets tipográficos precalculados por UI; se reemplazan sólo al hacer resize. */
+  /** Puntos tipográficos absolutos (px CSS) hacia los que viaja el grupo de partículas del texto. */
   setRevealTargets(targets: Float32Array): void {
     this.revealTargets = new Float32Array(targets);
     this.revealTargetCount = targets.length / 2;
+  }
+
+  /** Momento en que la silueta termina de expandirse y suspenderse tras BOTH_HANDS_UP. */
+  get celebrationPeakAt(): number {
+    return this.celebrationStart + this.settings.revealExpandMs + this.settings.revealSuspendMs;
+  }
+
+  /**
+   * Una fracción del cuerpo viaja a un texto y regresa. Las partículas conservan su celda: el
+   * tracking nunca se detiene y la persona puede seguir moviéndose. Si ya estaban sobre un texto
+   * (reveal), viajan directamente al nuevo (marca) sin volver primero al cuerpo.
+   */
+  startTextFlight(targets: Float32Array, now: number, timing: TextFlightTiming): void {
+    const continuing = this.flightActive && this.flightBlendAt(now) > 0.3;
+    this.setRevealTargets(targets);
+    let selected = 0;
+    for (let p = 0; p < this.capacity; p++) if (this.mode[p] === BODY && this.revealTarget[p] >= 0) selected++;
+    if (selected === 0) this.selectTextParticles();
+    for (let p = 0; p < this.capacity; p++) {
+      const from = continuing && this.revealTarget[p] >= 0 ? 1 : 0;
+      this.flightUsesFrom[p] = from;
+      if (from) {
+        this.flightFrom[p * 2] = this.px[p];
+        this.flightFrom[p * 2 + 1] = this.py[p];
+      }
+    }
+    this.flightActive = targets.length > 0;
+    this.flightStart = timing.startAt;
+    this.flightTravel = Math.max(1, timing.travelMs);
+    this.flightHold = Math.max(0, timing.holdMs);
+    this.flightReturn = Math.max(1, timing.returnMs);
   }
 
   resize(width: number, height: number): void {
@@ -383,20 +431,46 @@ export class ParticleSystem {
     const dispersionStep = dtMs / s.dispersionDuration;
     const formationFadeMs = s.formationDuration * 0.6;
     const fadeDelayMs = s.dispersionDuration * 0.2;
-    const exciteDecay = Math.exp(-dtMs / EXCITE_DECAY_MS);
+    const exciteDecay = Math.exp(-dtMs / s.gestureExciteDecayMs);
     const glowAlpha = 1 - Math.exp(-dtMs / GLOW_SMOOTHING_MS);
     const time = now * 0.001;
-    const wavesActive = now - this.lastWaveAt < WAVE_LIFETIME_MS;
+    const waveLifetime = s.waveMaxRadius / s.waveSpeed;
+    const wavesActive = now - this.lastWaveAt < waveLifetime;
     const waveSpeed = s.waveSpeed * scale;
     const waveWidth = s.waveWidth * scale;
-    const celebrationProgress = this.celebrationDuration > 0 ? (now - this.celebrationStart) / this.celebrationDuration : -1;
-    const celebrationEnvelope = celebrationProgress >= 0 && celebrationProgress <= 1 ? Math.sin(celebrationProgress * Math.PI) : 0;
-    let textEnvelope = 0;
-    if (celebrationProgress >= 0.16 && celebrationProgress < 0.82) {
-      const rise = Math.min(1, (celebrationProgress - 0.16) / 0.18);
-      const fall = Math.min(1, (0.82 - celebrationProgress) / 0.2);
-      textEnvelope = Math.min(rise, fall);
-      textEnvelope = textEnvelope * textEnvelope * (3 - 2 * textEnvelope);
+    const waveGlowRadius = s.waveGlowRadius * scale;
+    if (wavesActive) {
+      for (let w = 0; w < MAX_WAVES; w++) {
+        const k = field && this.wavePersonId[w] >= 0 ? field.personIndex(this.wavePersonId[w]) : -1;
+        this.waveOriginX[w] = k >= 0 && field ? field.peopleX[k] + this.waveOffsetX[w] : this.waveX[w];
+        this.waveOriginY[w] = k >= 0 && field ? field.peopleY[k] + this.waveOffsetY[w] : this.waveY[w];
+      }
+    }
+
+    // BOTH_HANDS_UP: expansión → suspensión → recuperación de la silueta.
+    const celebrationAge = now - this.celebrationStart;
+    const suspendEnd = s.revealExpandMs + s.revealSuspendMs;
+    let celebrationEnvelope = 0;
+    if (celebrationAge >= 0 && celebrationAge < this.celebrationDuration) {
+      if (celebrationAge < s.revealExpandMs) celebrationEnvelope = smoothstep(0, s.revealExpandMs, celebrationAge);
+      else if (celebrationAge < suspendEnd) celebrationEnvelope = 1;
+      else celebrationEnvelope = 1 - smoothstep(suspendEnd, Math.max(suspendEnd + 1, this.celebrationDuration), celebrationAge);
+    }
+
+    // Vuelo al texto: `flightBlend` sube al viajar, se mantiene y baja al regresar.
+    let flightBlend = 0;
+    let flightTravelEase = 0;
+    let flightReturning = false;
+    if (this.flightActive) {
+      const t = now - this.flightStart;
+      if (t >= this.flightTravel + this.flightHold + this.flightReturn) {
+        this.flightActive = false;
+        this.revealTarget.fill(-1);
+      } else if (t >= 0) {
+        flightBlend = this.flightBlendAt(now);
+        flightTravelEase = smoothstep(0, this.flightTravel, t);
+        flightReturning = t >= this.flightTravel + this.flightHold;
+      }
     }
 
     const attractionRadiusSq = (s.formationAttractionRadius * scale) ** 2;
@@ -447,6 +521,7 @@ export class ParticleSystem {
       let e = excite[p] * exciteDecay;
       const sd = seed[p];
       let anticipation = 0;
+      let textDetach = 0;
 
       if (m === BODY && cellX && cellY && cellProximity && cellEdge) {
         bodyCount++;
@@ -483,12 +558,20 @@ export class ParticleSystem {
           }
         }
         const revealIndex = this.revealTarget[p];
-        if (textEnvelope > 0 && revealIndex >= 0 && revealIndex < this.revealTargetCount) {
-          const targetOffset = revealIndex * 2;
-          const textBlend = textEnvelope * 0.82;
-          tx = lerp(tx, this.revealTargets[targetOffset], textBlend);
-          ty = lerp(ty, this.revealTargets[targetOffset + 1], textBlend);
-          e = Math.max(e, textEnvelope * 0.72);
+        if (flightBlend > 0 && revealIndex >= 0 && this.revealTargetCount > 0) {
+          const targetOffset = (revealIndex % this.revealTargetCount) * 2;
+          let toX = this.revealTargets[targetOffset];
+          let toY = this.revealTargets[targetOffset + 1];
+          if (this.flightUsesFrom[p] === 1) {
+            toX = lerp(this.flightFrom[p * 2], toX, flightTravelEase);
+            toY = lerp(this.flightFrom[p * 2 + 1], toY, flightTravelEase);
+            textDetach = flightReturning ? flightBlend : 1;
+          } else {
+            textDetach = flightBlend;
+          }
+          tx = lerp(tx, toX, textDetach);
+          ty = lerp(ty, toY, textDetach);
+          e = Math.max(e, textDetach * s.textParticleGlow);
         }
 
         flow.sample(x, y);
@@ -497,15 +580,15 @@ export class ParticleSystem {
         fast = Math.max(fast, retargetFastBlend(now - retargetedAt[p], s));
         const trail = (sd * 9.73) % 1 < s.fastMotionTrailRatio ? s.fastMotionTrail * fast : 0;
         const suspension = 1 - celebrationEnvelope * s.revealSuspension;
-        const textDetach = textEnvelope > 0 && revealIndex >= 0 ? textEnvelope : 0;
 
         // INITIAL FORMATION y NORMAL/FAST TRACKING se mezclan por `formed`; DEPARTURE por `letGo`.
         const formationK = s.particleAttraction * ease;
         const formationDamping = ambientDamping + (bodyDamping - ambientDamping) * ease;
         const trackK = lerp(s.trackingAttraction, s.fastMotionAttraction, fast);
         const trackDamping = lerp(trackingDamping, fastDamping, fast);
-        const k = lerp(formationK, trackK, formed) * suspension * (1 - letGo);
-        const damping = lerp(lerp(formationDamping, trackDamping, formed), ambientDamping, letGo);
+        // Las partículas que viajan al texto planean con un resorte suave; al volver recuperan el tracking.
+        const k = lerp(lerp(formationK, trackK, formed) * suspension * (1 - letGo), s.textTravelAttraction, textDetach);
+        const damping = lerp(lerp(lerp(formationDamping, trackDamping, formed), ambientDamping, letGo), bodyDamping, textDetach);
         const snap = lerp(trackingSnap, fastSnap, fast) * formed * (1 - trail) * (1 - letGo) * (1 - textDetach) *
           (1 - Math.min(1, e * s.gestureSnapRelief)) * suspension;
         const maxSpeed = lerp(formationMaxSpeed, trackingMaxSpeed, formed);
@@ -528,7 +611,7 @@ export class ParticleSystem {
             y += (ty - y) * snap;
           }
         }
-        if (!(textEnvelope > 0 && revealIndex >= 0)) {
+        if (textDetach === 0) {
           targetDistanceTotal += Math.hypot(tx - x, ty - y);
           targetDistanceSamples++;
         }
@@ -637,10 +720,15 @@ export class ParticleSystem {
       if (wavesActive) {
         for (let w = 0; w < MAX_WAVES; w++) {
           const age = now - this.waveStart[w];
-          if (age < 0 || age > WAVE_LIFETIME_MS) continue;
-          const dx = x - this.waveX[w];
-          const dy = y - this.waveY[w];
+          if (age < 0 || age > waveLifetime) continue;
+          const dx = x - this.waveOriginX[w];
+          const dy = y - this.waveOriginY[w];
           const dist = Math.sqrt(dx * dx + dy * dy) + 0.001;
+          const life = 1 - age / waveLifetime;
+          if (dist < waveGlowRadius) {
+            const near = 1 - dist / waveGlowRadius;
+            e = Math.max(e, s.waveGlow * near * near * life);
+          }
           const angle = Math.atan2(dy, dx);
           const warp = waveWidth * s.waveOrganicWarp * (
             Math.sin(angle * 3.1 + phase[p] + age * 0.004) * 0.66 +
@@ -650,9 +738,8 @@ export class ParticleSystem {
           if (offset >= waveWidth) continue;
           // Perfil coseno: frente suave, sin borde duro.
           const falloff = 0.5 + 0.5 * Math.cos((offset / waveWidth) * Math.PI);
-          const life = 1 - age / WAVE_LIFETIME_MS;
           const envelope = life * life;
-          const push = falloff * envelope * this.waveStrength[w] * scale * (m === BODY ? 1 : WAVE_AMBIENT_FACTOR);
+          const push = falloff * envelope * this.waveStrength[w] * scale * (m === BODY ? 1 : s.waveAmbientFactor);
           const curl = Math.sin(angle * 2 + phase[p] + age * 0.005) * push * 0.16;
           velX += (dx / dist) * push - (dy / dist) * curl;
           velY += (dy / dist) * push + (dx / dist) * curl;
@@ -678,8 +765,8 @@ export class ParticleSystem {
         size = idleSize + (bodySize - idleSize) * vis;
         alpha = alpha + (glow[p] - alpha) * vis;
       }
-      size *= scale * (1 + e * EXCITE_SIZE);
-      alpha = (alpha + e * EXCITE_ALPHA) * l;
+      size *= scale * (1 + e * s.gestureExciteSize) * lerp(1, s.textParticleSize, textDetach);
+      alpha = (alpha + e * s.gestureExciteAlpha) * l * lerp(1, s.textParticleAlpha, textDetach);
       if (alpha < 0.004) continue;
 
       renderData[out++] = x;
@@ -708,11 +795,16 @@ export class ParticleSystem {
     }
   }
 
-  /** Onda expansiva local (p. ej. al levantar una mano). Coordenadas en px CSS. */
-  emitWave(x: number, y: number, now: number, strength = 1): void {
+  /** Onda local alrededor de la mano (px CSS). Si se indica la persona, la onda la acompaña. */
+  emitWave(x: number, y: number, now: number, strength = 1, personId = -1): void {
     const w = this.waveCursor++ % MAX_WAVES;
+    const field = this.field;
+    const k = field && personId >= 0 ? field.personIndex(personId) : -1;
     this.waveX[w] = x;
     this.waveY[w] = y;
+    this.wavePersonId[w] = k >= 0 ? personId : -1;
+    this.waveOffsetX[w] = k >= 0 && field ? x - field.peopleX[k] : 0;
+    this.waveOffsetY[w] = k >= 0 && field ? y - field.peopleY[k] : 0;
     this.waveStart[w] = now;
     this.waveStrength[w] = this.settings.waveStrength * strength;
     this.lastWaveAt = now;
@@ -724,14 +816,9 @@ export class ParticleSystem {
     this.celebrationStart = now;
     this.celebrationDuration = Math.max(1, durationMs);
     this.celebrationStrength = strength;
-    this.revealTarget.fill(-1);
-    let revealCursor = 0;
+    this.selectTextParticles();
     for (let p = 0; p < this.capacity; p++) {
       if (this.mode[p] !== BODY) continue;
-      if (this.revealTargetCount > 0 && this.bond[p] > 0.72 && this.seed[p] < TEXT_PARTICLE_RATIO) {
-        this.revealTarget[p] = (revealCursor * 37) % this.revealTargetCount;
-        revealCursor++;
-      }
       let dx = this.random() - 0.5;
       let dy = this.random() - 0.5;
       if (field) {
@@ -747,6 +834,27 @@ export class ParticleSystem {
       this.vy[p] += (dy / dist) * kick;
       this.excite[p] = Math.max(this.excite[p], 0.58);
     }
+  }
+
+  /** Grupo estable de partículas del cuerpo (según su semilla) que participa en los textos. */
+  private selectTextParticles(): void {
+    this.revealTarget.fill(-1);
+    let cursor = 0;
+    for (let p = 0; p < this.capacity; p++) {
+      if (this.mode[p] !== BODY || this.bond[p] <= TEXT_MIN_BOND) continue;
+      if ((this.seed[p] * 3.71) % 1 >= this.settings.textParticleRatio) continue;
+      // Paso primo: reparte el grupo por todo el texto en lugar de llenarlo en orden.
+      this.revealTarget[p] = cursor * 37;
+      cursor++;
+    }
+  }
+
+  private flightBlendAt(now: number): number {
+    const t = now - this.flightStart;
+    if (t < 0) return 0;
+    if (t < this.flightTravel) return smoothstep(0, this.flightTravel, t);
+    if (t < this.flightTravel + this.flightHold) return 1;
+    return 1 - smoothstep(0, this.flightReturn, t - this.flightTravel - this.flightHold);
   }
 
   /**

@@ -151,6 +151,74 @@ describe('ParticleSystem mirror tracking', () => {
   });
 });
 
+describe('ParticleSystem BOTH_HANDS_UP reveal', () => {
+  it('desprende una fracción hacia el texto sin perder celdas ni tracking y la regresa al cuerpo', () => {
+    const config = structuredClone(defaultConfig);
+    config.particles.particleCount = 1200;
+    config.particles.bodyParticleBudget = 1200;
+    config.particles.idleParticleCount = 0;
+    config.particles.particleSpacing = 12;
+    config.particles.particleNoise = 0;
+    config.particles.cellJitter = 0;
+    const field = new TargetField(config);
+    const system = new ParticleSystem(config.particles);
+    field.resize(480, 360);
+    system.resize(480, 360);
+
+    activateRectangle(field, 3, 10, 34, 8, 36);
+    system.applyTargets(field, 1000);
+    const state = internals(system);
+    const body: number[] = [];
+    for (let p = 0; p < system.capacity; p++) {
+      if (state.mode[p] !== BODY) continue;
+      body.push(p);
+      state.bond[p] = 1;
+      state.life[p] = 1;
+      state.px[p] = field.cellX[state.cell[p]];
+      state.py[p] = field.cellY[state.cell[p]];
+    }
+    const cells = body.map((p) => state.cell[p]);
+
+    const p = config.particles;
+    let now = 2000;
+    system.celebrate(now, p.revealExpandMs + p.revealSuspendMs + p.revealRecoverMs, 3);
+    const textX = 420;
+    const textY = 40;
+    system.startTextFlight(new Float32Array([textX, textY, textX + 10, textY]), now, {
+      startAt: system.celebrationPeakAt,
+      travelMs: 400,
+      holdMs: 600,
+      returnMs: 500,
+    });
+
+    const frameMs = 1000 / 60;
+    const advanceTo = (time: number) => {
+      while (now < time) {
+        now += frameMs;
+        system.step(frameMs / 1000, now);
+      }
+    };
+    const onText = () => body.filter((q) => Math.hypot(state.px[q] - textX, state.py[q] - textY) < 30);
+
+    advanceTo(system.celebrationPeakAt + 400 + 500);
+    const detached = onText().length;
+    expect(detached / body.length).toBeGreaterThan(p.textParticleRatio * 0.5);
+    expect(detached / body.length).toBeLessThan(p.textParticleRatio * 1.5);
+    expect(body.map((q) => state.cell[q])).toEqual(cells);
+    expect(body.every((q) => state.mode[q] === BODY)).toBe(true);
+
+    // El cuerpo sigue su tracking durante el reveal: las demás partículas permanecen en su celda.
+    const staying = body.filter((q) => Math.hypot(state.px[q] - textX, state.py[q] - textY) >= 30);
+    const stayingDistance = staying.reduce((sum, q) => sum + Math.hypot(state.px[q] - field.cellX[state.cell[q]], state.py[q] - field.cellY[state.cell[q]]), 0) / staying.length;
+    expect(stayingDistance).toBeLessThan(field.spacing);
+
+    advanceTo(system.celebrationPeakAt + 400 + 600 + 500 + 2500);
+    expect(onText()).toHaveLength(0);
+    const returned = body.reduce((sum, q) => sum + Math.hypot(state.px[q] - field.cellX[state.cell[q]], state.py[q] - field.cellY[state.cell[q]]), 0) / body.length;
+    expect(returned).toBeLessThan(field.spacing * 0.5);
+  });
+});
+
 describe('ParticleSystem temporal transport', () => {
   it('reutiliza las mismas partículas y conserva su estado al mover una persona', () => {
     const config = structuredClone(defaultConfig);

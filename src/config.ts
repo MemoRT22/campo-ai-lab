@@ -223,16 +223,45 @@ export const defaultConfig = {
     breathingAmount: 0.055,
     /** Brillo extra del contorno para reforzar el reconocimiento de la silueta. */
     edgeBrightness: 1.28,
-    /** Onda del gesto de mano: px/ms, ancho del frente (px) y empuje. */
-    waveSpeed: 0.5,
-    waveWidth: 125,
-    waveStrength: 1.45,
+
+    /* ONE_HAND_UP — onda orgánica alrededor de la mano; acompaña a la persona si se mueve. */
+    /** Velocidad del frente (px/ms de referencia), ancho del frente (px), empuje y radio máximo. */
+    waveSpeed: 0.34,
+    waveWidth: 110,
+    waveStrength: 1.35,
+    waveMaxRadius: 240,
     waveOrganicWarp: 0.18,
+    /** Las partículas libres casi no tienen fricción: la onda sólo las roza para no dibujar anillos. */
+    waveAmbientFactor: 0.12,
+    /** Brillo leve concentrado junto a la mano. */
+    waveGlow: 0.4,
+    waveGlowRadius: 110,
+    gestureExciteSize: 0.7,
+    gestureExciteAlpha: 0.16,
+    gestureExciteDecayMs: 650,
     /** Cuánto se relaja el seguimiento directo donde un gesto excita partículas (deja ver la onda). */
     gestureSnapRelief: 0.85,
-    /** Expansión y suspensión parciales del reveal; nunca detienen el tracking. */
+
+    /* BOTH_HANDS_UP — expansión → suspensión → desprendimiento → texto → regreso. Nunca detiene el tracking. */
     revealExpansion: 16,
     revealSuspension: 0.26,
+    revealExpandMs: 320,
+    revealSuspendMs: 380,
+    revealRecoverMs: 700,
+    /** Fracción del cuerpo que viaja al texto y cuántos puntos tipográficos se muestrean como máximo. */
+    textParticleRatio: 0.2,
+    textParticleMaxTargets: 900,
+    /** Las partículas sobre el texto son más tenues y pequeñas: la legibilidad del texto manda. */
+    textParticleAlpha: 0.5,
+    textParticleSize: 0.75,
+    textParticleGlow: 0.25,
+    textTravelAttraction: 0.09,
+    revealTravelMs: 800,
+    revealHoldMs: 2400,
+    revealReturnMs: 1000,
+    /** Tras el reveal, las mismas partículas pasan del texto a la marca y luego regresan al cuerpo. */
+    brandTravelMs: 1100,
+    brandReturnMs: 1200,
   },
 
   render: {
@@ -256,7 +285,8 @@ export const defaultConfig = {
     /** Deja terminar la onda de la mano antes de pedir las dos. */
     secondInstructionDelayMs: 1500,
     revealDurationMs: 4400,
-    revealScatterMs: 1400,
+    /** El título aparece cuando termina la suspensión de la silueta. */
+    revealTextDelayMs: 650,
     gestureCooldown: 350,
     absenceGraceMs: 900,
     /** Si la persona regresa antes de este tiempo, se retoma la secuencia sin repetir el saludo. */
@@ -264,8 +294,8 @@ export const defaultConfig = {
     departureDurationMs: 2800,
     /** Presencia mínima para considerar que hubo interacción (y mostrar la marca al salir). */
     engagedMinMs: 4000,
-    brandAfterRevealMs: 1000,
-    brandDurationMs: 4800,
+    brandAfterRevealMs: 450,
+    brandDurationMs: 5200,
     brandAfterPresenceMs: 26000,
   },
 

@@ -1,6 +1,7 @@
 import type { Config } from '../config';
-import type { PlacementResolver } from './InstructionOverlay';
+import { renderLines, type PlacementResolver } from './InstructionOverlay';
 import type { TextAnchor } from './NegativeSpaceLayout';
+import { brandBlock, linesOf } from './TextParticleSampler';
 
 export type BrandPlacement = 'center' | 'lower' | 'auto';
 
@@ -10,10 +11,17 @@ export class BrandOverlay {
   onShow: ((anchor: TextAnchor | null, now: number, durationMs: number) => void) | null = null;
 
   private readonly el: HTMLElement;
+  private readonly nameEl: HTMLElement;
+  private readonly labEl: HTMLElement;
   private hideAt = 0;
   private isVisible = false;
 
-  constructor(root: HTMLElement, branding: Config['branding'], private readonly resolvePlacement: PlacementResolver | null = null) {
+  constructor(
+    root: HTMLElement,
+    private readonly branding: Config['branding'],
+    private readonly resolvePlacement: PlacementResolver | null = null,
+    private readonly typographyScale = 1,
+  ) {
     this.el = document.createElement('div');
     this.el.className = 'brand';
     this.el.dataset.visible = 'false';
@@ -34,6 +42,8 @@ export class BrandOverlay {
     lab.className = 'brand__lab';
     lab.textContent = branding.labName;
     this.el.append(name, rule, lab);
+    this.nameEl = name;
+    this.labEl = lab;
 
     if (branding.tagline) {
       const tagline = document.createElement('div');
@@ -60,8 +70,17 @@ export class BrandOverlay {
       this.el.style.setProperty('--text-x', `${anchor.x}px`);
       this.el.style.setProperty('--text-y', `${anchor.y}px`);
       this.el.style.setProperty('--text-width', `${anchor.width}px`);
+      const block = brandBlock(this.branding.brandName, this.branding.labName, anchor.width, {
+        width: window.innerWidth,
+        height: window.innerHeight,
+        typographyScale: this.typographyScale,
+      });
+      renderLines(this.nameEl, linesOf(block, 'brandName'));
+      renderLines(this.labEl, linesOf(block, 'brandLab'));
     } else {
       this.el.dataset.placement = placement === 'auto' ? 'center' : placement;
+      this.nameEl.textContent = this.branding.brandName;
+      this.labEl.textContent = this.branding.labName;
     }
     this.el.dataset.visible = 'true';
     this.isVisible = true;

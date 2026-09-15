@@ -10,7 +10,7 @@ import { DebugPanel } from '../ui/DebugPanel';
 import { InstructionOverlay } from '../ui/InstructionOverlay';
 import { NegativeSpaceLayout } from '../ui/NegativeSpaceLayout';
 import { PrivacyNotice } from '../ui/PrivacyNotice';
-import { sampleTextParticleTargets } from '../ui/TextParticleSampler';
+import { brandBlock, revealBlock, sampleTypeBlock, type TypeViewport } from '../ui/TextParticleSampler';
 import { setupKiosk } from '../utils/Kiosk';
 import { PerformanceMonitor } from '../utils/PerformanceMonitor';
 import { CameraVisionSource } from '../vision/CameraVisionSource';
@@ -53,13 +53,38 @@ export class App {
     this.particles = new ParticleSystem(config.particles);
     this.layout = new NegativeSpaceLayout(config.layout);
     const resolvePlacement = this.layout.resolve.bind(this.layout);
-    const overlay = new InstructionOverlay(overlayRoot, resolvePlacement);
-    const brand = new BrandOverlay(overlayRoot, config.branding, resolvePlacement);
+    const overlay = new InstructionOverlay(overlayRoot, resolvePlacement, config.typography.scale);
+    const brand = new BrandOverlay(overlayRoot, config.branding, resolvePlacement, config.typography.scale);
     const privacy = new PrivacyNotice(overlayRoot, config.privacy, config.texts.privacy);
     this.experience = new Experience(config, overlay, brand, privacy, now);
     this.interaction = new InteractionManager(config, this.particles, this.field, this.experience);
     this.gestures = new GestureRecognizer(config.gestures);
     this.source = config.mockVision ? new MockVisionSource(config) : new CameraVisionSource(config);
+
+    // Las partículas del reveal y de la marca apuntan al lugar donde el texto realmente apareció.
+    const p = config.particles;
+    overlay.onRender = (message, anchor, now) => {
+      if (message.variant !== 'title' || !anchor) return;
+      const viewport = this.viewport();
+      const block = revealBlock(message.message, message.subMessage ?? '', anchor.width, viewport);
+      this.particles.startTextFlight(sampleTypeBlock(block, anchor.x, anchor.y, p.textParticleMaxTargets, viewport), now, {
+        startAt: Math.max(now, this.particles.celebrationPeakAt),
+        travelMs: p.revealTravelMs,
+        holdMs: p.revealHoldMs,
+        returnMs: p.revealReturnMs,
+      });
+    };
+    brand.onShow = (anchor, now, durationMs) => {
+      if (!anchor || this.experience.state !== 'presence') return;
+      const viewport = this.viewport();
+      const block = brandBlock(config.branding.brandName, config.branding.labName, anchor.width, viewport);
+      this.particles.startTextFlight(sampleTypeBlock(block, anchor.x, anchor.y, p.textParticleMaxTargets, viewport), now, {
+        startAt: now,
+        travelMs: p.brandTravelMs,
+        holdMs: Math.max(0, durationMs - p.brandTravelMs - p.brandReturnMs),
+        returnMs: p.brandReturnMs,
+      });
+    };
 
     this.experience.onStateChange = (from, to) => {
       if (to === 'idle') this.idleSince = performance.now();
@@ -91,7 +116,6 @@ export class App {
     window.addEventListener('resize', this.resize);
     setupKiosk(this.config, () => this.experience.state === 'idle' && performance.now() - this.idleSince > IDLE_BEFORE_RELOAD_MS);
     if (this.debug) window.addEventListener('keydown', this.handleDebugKey);
-    void document.fonts?.ready.then(() => this.updateRevealTargets());
 
     try {
       this.source.start();
@@ -149,17 +173,10 @@ export class App {
     this.field.resize(width, height);
     this.layout.update(this.field, performance.now());
     this.particles.resize(width, height);
-    this.updateRevealTargets();
   };
 
-  private updateRevealTargets(): void {
-    this.particles.setRevealTargets(sampleTextParticleTargets(
-      this.config.texts.revealTitle,
-      this.config.texts.revealSubtitle,
-      window.innerWidth,
-      window.innerHeight,
-      this.config.typography.scale,
-    ));
+  private viewport(): TypeViewport {
+    return { width: window.innerWidth, height: window.innerHeight, typographyScale: this.config.typography.scale };
   }
 
   private readonly handleDebugKey = (event: KeyboardEvent): void => {
