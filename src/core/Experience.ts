@@ -1,0 +1,208 @@
+import type { Config } from '../config';
+import type { GestureEvent } from '../interaction/GestureEvents';
+import type { BrandOverlay } from '../ui/BrandOverlay';
+import type { InstructionOverlay } from '../ui/InstructionOverlay';
+import type { PrivacyNotice } from '../ui/PrivacyNotice';
+import { StateMachine } from './StateMachine';
+
+export type ExperienceState = 'idle' | 'presence' | 'departure';
+
+interface Session {
+  startedAt: number;
+  greeted: boolean;
+  firstHint: boolean;
+  gestureOneAt: number;
+  secondHint: boolean;
+  revealAt: number;
+  brandShown: boolean;
+}
+
+const ID = {
+  idle: 'idle-prompt',
+  greeting: 'greeting',
+  raiseHand: 'raise-hand',
+  tryBoth: 'try-both',
+  reveal: 'reveal',
+} as const;
+
+const PRIORITY = { idle: 0, greeting: 1, hint: 2, reveal: 5 } as const;
+
+/**
+ * Dirección narrativa de la instalación: qué se dice y cuándo.
+ * No sabe nada de partículas ni de visión; sólo recibe cuántas personas hay y qué gestos ocurren.
+ *
+ *   IDLE ──persona──▶ PRESENCE ──nadie (gracia)──▶ DEPARTURE ──tiempo──▶ IDLE
+ *                        ▲                            │
+ *                        └─────────persona────────────┘
+ */
+export class Experience {
+  onStateChange: ((from: ExperienceState, to: ExperienceState) => void) | null = null;
+
+  private readonly machine: StateMachine<ExperienceState>;
+  private people = 0;
+  private absentSince = -1;
+  private idlePromptShown = false;
+  private session: Session | null = null;
+  private lastDepartureAt = -Infinity;
+
+  constructor(
+    private readonly config: Config,
+    private readonly overlay: InstructionOverlay,
+    private readonly brand: BrandOverlay,
+    private readonly privacy: PrivacyNotice,
+    now: number,
+  ) {
+    this.machine = new StateMachine<ExperienceState>(
+      {
+        idle: {
+          enter: () => {
+            this.idlePromptShown = false;
+          },
+          update: (t, elapsed) => this.updateIdle(t, elapsed),
+          exit: (t) => this.overlay.hide(ID.idle, t),
+        },
+        presence: {
+          enter: (t) => this.enterPresence(t),
+          update: (t) => this.updatePresence(t),
+        },
+        departure: {
+          enter: (t) => this.enterDeparture(t),
+          update: (t, elapsed) => {
+            if (this.people > 0) this.machine.transition('presence', t);
+            else if (elapsed > this.config.experience.departureDurationMs) this.machine.transition('idle', t);
+          },
+        },
+      },
+      'idle',
+      now,
+    );
+  }
+
+  get state(): ExperienceState {
+    return this.machine.current;
+  }
+
+  update(now: number, peopleCount: number): void {
+    this.people = peopleCount;
+    const previous = this.machine.current;
+    this.machine.update(now);
+    if (this.machine.current !== previous) this.onStateChange?.(previous, this.machine.current);
+    this.overlay.update(now);
+    this.brand.update(now);
+    this.privacy.update(now);
+  }
+
+  onGesture(event: GestureEvent, now: number): void {
+    const session = this.session;
+    if (this.machine.current !== 'presence' || !session) return;
+    const { texts, experience } = this.config;
+
+    if (event.type === 'hand-raised' && session.gestureOneAt < 0) {
+      session.gestureOneAt = now;
+      this.overlay.hide(ID.raiseHand, now);
+    }
+
+    if (event.type === 'both-hands-raised' && (session.revealAt < 0 || now - session.revealAt > experience.revealDurationMs)) {
+      session.revealAt = now;
+      session.secondHint = true;
+      if (session.gestureOneAt < 0) session.gestureOneAt = now;
+      this.brand.hide();
+      this.overlay.show(
+        {
+          id: ID.reveal,
+          message: texts.revealTitle,
+          subMessage: texts.revealSubtitle,
+          placement: 'center',
+          variant: 'title',
+          timeout: experience.revealDurationMs,
+          priority: PRIORITY.reveal,
+          opacity: 0.92,
+        },
+        now,
+      );
+    }
+  }
+
+  private updateIdle(now: number, elapsed: number): void {
+    if (this.people > 0) {
+      this.machine.transition('presence', now);
+      return;
+    }
+    if (!this.idlePromptShown && elapsed > this.config.experience.idlePromptDelayMs) {
+      this.idlePromptShown = true;
+      this.overlay.show(
+        { id: ID.idle, message: this.config.texts.idlePrompt, placement: 'center', variant: 'prompt', priority: PRIORITY.idle, opacity: 0.62 },
+        now,
+      );
+    }
+  }
+
+  private enterPresence(now: number): void {
+    this.absentSince = -1;
+    const resumed = this.session !== null && now - this.lastDepartureAt < this.config.experience.returnWithinMs;
+    if (!resumed) {
+      this.session = { startedAt: now, greeted: false, firstHint: false, gestureOneAt: -1, secondHint: false, revealAt: -1, brandShown: false };
+    }
+    this.brand.hide();
+    this.privacy.request(now, this.config.privacy.presenceDelayMs);
+  }
+
+  private updatePresence(now: number): void {
+    const { experience, texts, branding } = this.config;
+    const session = this.session;
+    if (!session) return;
+
+    if (this.people === 0) {
+      if (this.absentSince < 0) this.absentSince = now;
+      else if (now - this.absentSince > experience.absenceGraceMs) this.machine.transition('departure', now);
+      return;
+    }
+    this.absentSince = -1;
+
+    const t = now - session.startedAt;
+
+    if (!session.greeted && t > experience.greetingDelayMs) {
+      session.greeted = true;
+      if (experience.showDetectedMessage) {
+        this.overlay.show(
+          { id: ID.greeting, message: texts.detected, placement: 'lower', timeout: experience.greetingDurationMs, priority: PRIORITY.greeting },
+          now,
+        );
+      }
+    }
+
+    if (!session.firstHint && t > experience.firstInstructionDelayMs) {
+      session.firstHint = true;
+      if (session.gestureOneAt < 0) this.overlay.show(
+        { id: ID.raiseHand, message: texts.raiseHand, icon: 'raise-hand', placement: 'lower', timeout: experience.instructionTimeout, priority: PRIORITY.hint },
+        now,
+      );
+    }
+
+    if (session.gestureOneAt >= 0 && !session.secondHint && now - session.gestureOneAt > experience.secondInstructionDelayMs) {
+      session.secondHint = true;
+      this.overlay.show(
+        { id: ID.tryBoth, message: texts.tryBoth, icon: 'raise-hand', placement: 'lower', timeout: experience.instructionTimeout, priority: PRIORITY.hint },
+        now,
+      );
+    }
+
+    if (branding.showBranding && !session.brandShown) {
+      const afterReveal = session.revealAt >= 0 && now - session.revealAt > experience.revealDurationMs + experience.brandAfterRevealMs;
+      const afterLongStay = t > experience.brandAfterPresenceMs && this.overlay.activeId === null;
+      if (afterReveal || afterLongStay) {
+        session.brandShown = true;
+        this.brand.show(now, experience.brandDurationMs, 'lower');
+      }
+    }
+  }
+
+  private enterDeparture(now: number): void {
+    const { experience, branding } = this.config;
+    this.lastDepartureAt = now;
+    this.overlay.hide(null, now);
+    const engaged = this.session !== null && now - this.session.startedAt > experience.engagedMinMs;
+    // Al irse, la pantalla le dice a la persona dónde estuvo.
+    if (branding.showBranding && engaged) this.brand.show(now, experience.departureDurationMs, 'center');
+  }
+}

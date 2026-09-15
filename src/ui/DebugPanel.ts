@@ -1,0 +1,140 @@
+import type { Config } from '../config';
+import type { Experience } from '../core/Experience';
+import type { InteractionManager } from '../interaction/InteractionManager';
+import type { ParticleSystem } from '../particles/ParticleSystem';
+import type { PerformanceMonitor } from '../utils/PerformanceMonitor';
+import type { VisionFrame, VisionSource } from '../vision/types';
+
+const TEXT_INTERVAL_MS = 250;
+const SLOT_TONES = [
+  [236, 236, 236],
+  [150, 200, 255],
+  [255, 196, 140],
+  [170, 240, 180],
+  [230, 160, 230],
+  [255, 240, 150],
+  [150, 230, 230],
+  [220, 180, 160],
+];
+
+export interface DebugContext {
+  config: Config;
+  source: VisionSource;
+  perf: PerformanceMonitor;
+  particles: ParticleSystem;
+  experience: Experience;
+  interaction: InteractionManager;
+  errors: string[];
+}
+
+function summarize(message: string): string {
+  const line = message.split('\n')[0];
+  return line.length > 140 ? `${line.slice(0, 140)}…` : line;
+}
+
+function proximityLabel(value: number): string {
+  return value < 0.33 ? 'FAR' : value < 0.66 ? 'MEDIUM' : 'CLOSE';
+}
+
+/** Información técnica para desarrollo. No se crea en absoluto fuera de debugMode. */
+export class DebugPanel {
+  private readonly el: HTMLElement;
+  private readonly stats: HTMLElement;
+  private readonly maskCanvas: HTMLCanvasElement;
+  private readonly maskCtx: CanvasRenderingContext2D;
+  private imageData: ImageData | null = null;
+  private lastTextAt = 0;
+  private videoAttached = false;
+
+  constructor(root: HTMLElement, private readonly ctx: DebugContext) {
+    this.el = document.createElement('aside');
+    this.el.className = 'debug';
+    this.maskCanvas = document.createElement('canvas');
+    this.maskCanvas.className = 'debug__mask';
+    const maskCtx = this.maskCanvas.getContext('2d');
+    if (!maskCtx) throw new Error('Canvas 2D no disponible');
+    this.maskCtx = maskCtx;
+    this.stats = document.createElement('pre');
+    this.stats.className = 'debug__stats';
+    const help = document.createElement('div');
+    help.className = 'debug__help';
+    help.textContent = '1 mano · 2 dos manos · D panel · F pantalla completa';
+    this.el.append(this.maskCanvas, this.stats, help);
+    root.appendChild(this.el);
+  }
+
+  toggle(): void {
+    this.el.hidden = !this.el.hidden;
+  }
+
+  drawFrame(frame: VisionFrame): void {
+    if (this.el.hidden) return;
+    this.attachVideo();
+    const { width, height, personMap, people } = frame;
+    const mirror = this.ctx.config.camera.mirror;
+    if (this.maskCanvas.width !== width || this.maskCanvas.height !== height || !this.imageData) {
+      this.maskCanvas.width = width;
+      this.maskCanvas.height = height;
+      this.imageData = this.maskCtx.createImageData(width, height);
+    }
+
+    const data = this.imageData.data;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const value = personMap[y * width + x];
+        const o = (y * width + (mirror ? width - 1 - x : x)) * 4;
+        const tone = value === 0 ? null : SLOT_TONES[(value - 1) % SLOT_TONES.length];
+        data[o] = tone ? tone[0] : 14;
+        data[o + 1] = tone ? tone[1] : 14;
+        data[o + 2] = tone ? tone[2] : 16;
+        data[o + 3] = 255;
+      }
+    }
+    const g = this.maskCtx;
+    g.putImageData(this.imageData, 0, 0);
+    g.lineWidth = 1;
+    g.font = '9px ui-monospace, monospace';
+    for (const person of people) {
+      const left = (mirror ? 1 - person.x1 : person.x0) * width;
+      const top = person.y0 * height;
+      const w = (person.x1 - person.x0) * width;
+      const h = (person.y1 - person.y0) * height;
+      g.strokeStyle = person.confirmed ? '#ff3b30' : '#8e8e93';
+      g.strokeRect(left + 0.5, top + 0.5, w, h);
+      g.fillStyle = '#ff3b30';
+      g.fillText(`#${person.id} ${proximityLabel(person.proximity)} ${person.proximity.toFixed(2)}`, left + 2, Math.max(9, top - 2));
+    }
+  }
+
+  update(now: number): void {
+    if (this.el.hidden || now - this.lastTextAt < TEXT_INTERVAL_MS) return;
+    this.lastTextAt = now;
+    this.attachVideo();
+    const { perf, particles, source, experience, interaction, errors } = this.ctx;
+    const status = source.status;
+    const gesture = interaction.lastGesture;
+    const lines = [
+      `render      ${perf.renderFps.toFixed(0)} fps · js ${perf.frameMs.toFixed(2)} ms`,
+      `vision      ${perf.visionFps.toFixed(0)} fps · inferencia ${perf.inferenceMs.toFixed(1)} ms · máscara ${perf.maskProcessingMs.toFixed(1)} ms`,
+      `latencia    ${perf.visionLatencyMs.toFixed(0)} ms (captura → resultado)`,
+      `partículas  ${particles.renderCount} visibles · ${particles.bodyCount} cuerpo · ${particles.ambientCount} ambiente · ${particles.dormantCount} pool`,
+      `estado      ${experience.state.toUpperCase()}`,
+      `cámara      ${status.camera}${status.cameraDetail ? ` · ${status.cameraDetail}` : ''}`,
+      `modelo      ${status.model}${status.delegate ? ` · ${status.delegate}` : ''}${status.labels.length ? ` · [${status.labels.join(', ')}]` : ''}`,
+      `gesto       ${gesture ? `${gesture.type} (${gesture.source}) hace ${((now - gesture.timestamp) / 1000).toFixed(1)} s` : '—'}`,
+    ];
+    if (status.cameras.length) lines.push(`cámaras     ${status.cameras.join(' | ')}`);
+    if (status.lastError) lines.push(`error       ${summarize(status.lastError)}`);
+    for (const error of errors.slice(-3)) lines.push(`!           ${summarize(error)}`);
+    this.stats.textContent = lines.join('\n');
+  }
+
+  private attachVideo(): void {
+    const video = this.ctx.source.debugVideo;
+    if (this.videoAttached || !video) return;
+    this.videoAttached = true;
+    video.classList.add('debug__video');
+    if (this.ctx.config.camera.mirror) video.classList.add('is-mirrored');
+    this.el.prepend(video);
+  }
+}

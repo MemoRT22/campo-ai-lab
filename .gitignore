@@ -1,0 +1,7 @@
+node_modules/
+dist/
+# Generado por scripts/copy-mediapipe-wasm.mjs en cada npm install
+public/mediapipe/
+.DS_Store
+*.log
+.vite/
