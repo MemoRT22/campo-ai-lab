@@ -3,6 +3,19 @@ import { createRandom, expAlpha, lerp, screenScale } from '../utils/MathUtils';
 import type { PersonInfo, VisionFrame } from '../vision/types';
 
 const BAYER_4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+const TRACK_STABLE_FRAMES = 3;
+const PREDICTION_MIN_SPEED = 45;
+const PREDICTION_MAX_SPEED = 2400;
+const REVERSAL_COSINE = -0.25;
+
+interface TrackMotion {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  stableFrames: number;
+  lastSeen: number;
+}
 
 /**
  * Traduce el mapa de siluetas (espacio de cámara) a una retícula fija en pantalla.
@@ -41,6 +54,13 @@ export class TargetField {
   /** Desplazamiento del centro de cada track desde el frame de visión anterior, en px CSS. */
   readonly peopleDx: Float32Array;
   readonly peopleDy: Float32Array;
+  /** Velocidad filtrada en px/ms y adelanto predictivo final en px CSS. */
+  readonly peopleVx: Float32Array;
+  readonly peopleVy: Float32Array;
+  readonly peopleSpeed: Float32Array;
+  readonly peoplePredictionX: Float32Array;
+  readonly peoplePredictionY: Float32Array;
+  readonly peoplePredictionActive: Uint8Array;
   /** Copia de la última detección para mapear gestos. */
   readonly lastPeople: PersonInfo[] = [];
 
@@ -63,7 +83,7 @@ export class TargetField {
   private readonly slotCount: Int32Array;
   private readonly slotSumX: Float64Array;
   private readonly slotSumY: Float64Array;
-  private readonly trackCenters = new Map<number, { x: number; y: number; lastSeen: number }>();
+  private readonly trackCenters = new Map<number, TrackMotion>();
 
   constructor(private readonly config: Config) {
     const slots = 8;
@@ -79,6 +99,12 @@ export class TargetField {
     this.peopleId = new Int32Array(slots).fill(-1);
     this.peopleDx = new Float32Array(slots);
     this.peopleDy = new Float32Array(slots);
+    this.peopleVx = new Float32Array(slots);
+    this.peopleVy = new Float32Array(slots);
+    this.peopleSpeed = new Float32Array(slots);
+    this.peoplePredictionX = new Float32Array(slots);
+    this.peoplePredictionY = new Float32Array(slots);
+    this.peoplePredictionActive = new Uint8Array(slots);
   }
 
   resize(width: number, height: number): void {
@@ -126,6 +152,12 @@ export class TargetField {
     this.activeCount = 0;
     this.peopleCount = 0;
     this.peopleId.fill(-1);
+    this.peopleVx.fill(0);
+    this.peopleVy.fill(0);
+    this.peopleSpeed.fill(0);
+    this.peoplePredictionX.fill(0);
+    this.peoplePredictionY.fill(0);
+    this.peoplePredictionActive.fill(0);
     this.trackCenters.clear();
     this.version++;
   }
@@ -195,18 +227,70 @@ export class TargetField {
       const y = slotSumY[s] / slotCount[s];
       const id = this.slotPersonId[s];
       const previous = this.trackCenters.get(id);
+      const elapsed = previous ? Math.max(1, now - previous.lastSeen) : 0;
+      const dx = previous ? x - previous.x : 0;
+      const dy = previous ? y - previous.y : 0;
+      const rawVx = previous ? dx / elapsed : 0;
+      const rawVy = previous ? dy / elapsed : 0;
+      const scale = screenScale(this.width, this.height);
+      const rawSpeed = Math.hypot(rawVx, rawVy) * 1000;
+      const previousSpeed = previous ? Math.hypot(previous.vx, previous.vy) * 1000 : 0;
+      const jump = previous === undefined || elapsed > cfg.vision.trackTimeoutMs || rawSpeed > PREDICTION_MAX_SPEED * scale;
+      const directionCosine = previous && rawSpeed > 0 && previousSpeed > 0
+        ? (rawVx * previous.vx + rawVy * previous.vy) / ((rawSpeed / 1000) * (previousSpeed / 1000))
+        : 1;
+      const reversal = !jump && rawSpeed > PREDICTION_MIN_SPEED * scale && previousSpeed > PREDICTION_MIN_SPEED * scale && directionCosine < REVERSAL_COSINE;
+
+      let vx = 0;
+      let vy = 0;
+      let stableFrames = 1;
+      if (previous && !jump) {
+        if (reversal) {
+          // Cambiar de dirección invalida el adelanto anterior durante dos muestras.
+          vx = rawVx;
+          vy = rawVy;
+          stableFrames = 1;
+        } else {
+          const alpha = expAlpha(elapsed, cfg.particles.predictionSmoothingMs);
+          vx = lerp(previous.vx, rawVx, alpha);
+          vy = lerp(previous.vy, rawVy, alpha);
+          stableFrames = Math.min(255, previous.stableFrames + 1);
+        }
+      }
+
+      const speed = Math.hypot(vx, vy) * 1000;
+      const canPredict = cfg.particles.predictionMs > 0 && !jump && !reversal && stableFrames >= TRACK_STABLE_FRAMES && speed >= PREDICTION_MIN_SPEED * scale;
+      let predictionX = canPredict ? vx * cfg.particles.predictionMs : 0;
+      let predictionY = canPredict ? vy * cfg.particles.predictionMs : 0;
+      const predictionDistance = Math.hypot(predictionX, predictionY);
+      const maxPrediction = cfg.particles.predictionMaxDistance * scale;
+      if (predictionDistance > maxPrediction && predictionDistance > 0) {
+        const factor = maxPrediction / predictionDistance;
+        predictionX *= factor;
+        predictionY *= factor;
+      }
+
       this.peopleX[k] = x;
       this.peopleY[k] = y;
       this.peopleProximity[k] = slotProximity[s];
       this.peopleId[k] = id;
-      this.peopleDx[k] = previous ? x - previous.x : 0;
-      this.peopleDy[k] = previous ? y - previous.y : 0;
+      this.peopleDx[k] = dx;
+      this.peopleDy[k] = dy;
+      this.peopleVx[k] = vx;
+      this.peopleVy[k] = vy;
+      this.peopleSpeed[k] = speed;
+      this.peoplePredictionX[k] = predictionX;
+      this.peoplePredictionY[k] = predictionY;
+      this.peoplePredictionActive[k] = canPredict ? 1 : 0;
       if (previous) {
         previous.x = x;
         previous.y = y;
+        previous.vx = vx;
+        previous.vy = vy;
+        previous.stableFrames = stableFrames;
         previous.lastSeen = now;
       } else {
-        this.trackCenters.set(id, { x, y, lastSeen: now });
+        this.trackCenters.set(id, { x, y, vx, vy, stableFrames, lastSeen: now });
       }
     }
     for (const [id, center] of this.trackCenters) {
@@ -246,6 +330,12 @@ export class TargetField {
     this.activeCount = 0;
     this.peopleCount = 0;
     this.peopleId.fill(-1);
+    this.peopleVx.fill(0);
+    this.peopleVy.fill(0);
+    this.peopleSpeed.fill(0);
+    this.peoplePredictionX.fill(0);
+    this.peoplePredictionY.fill(0);
+    this.peoplePredictionActive.fill(0);
     this.cellPersonId.fill(-1);
     this.trackCenters.clear();
     this.lastPeople.length = 0;
@@ -254,6 +344,12 @@ export class TargetField {
   personIndex(id: number): number {
     for (let i = 0; i < this.peopleCount; i++) if (this.peopleId[i] === id) return i;
     return -1;
+  }
+
+  /** Edad desde la última observación del track; Infinity si ya no existe. */
+  trackAge(id: number, now: number): number {
+    const track = this.trackCenters.get(id);
+    return track ? now - track.lastSeen : Infinity;
   }
 
   /** Convierte coordenadas normalizadas de cámara a px CSS en pantalla (aplica recorte, encuadre y espejo). */

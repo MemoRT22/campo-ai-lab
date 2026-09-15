@@ -63,8 +63,8 @@ export const defaultConfig = {
     /** Histéresis: un píxel encendido se apaga hasta bajar de threshold − hysteresis. */
     maskHysteresis: 0.2,
     /** Suavizado temporal asimétrico: aparecer rápido, desaparecer más lento. */
-    smoothingAttackMs: 35,
-    smoothingReleaseMs: 140,
+    smoothingAttackMs: 22,
+    smoothingReleaseMs: 65,
     spatialBlurRadius: 1,
     /** Área mínima de una silueta (fracción de la región útil). Filtra sombras y objetos pequeños. */
     minPersonArea: 0.006,
@@ -99,13 +99,13 @@ export const defaultConfig = {
     farSize: 0.3,
     /** Tamaño aparente considerado CERCA. */
     closeSize: 0.9,
-    smoothingMs: 650,
+    smoothingMs: 500,
   },
 
   particles: {
     /** Tamaño total del pool (ambiente + cuerpos + transiciones). */
     particleCount: 9000,
-    idleParticleCount: 900,
+    idleParticleCount: 1050,
     /** Máximo de partículas repartidas entre todas las siluetas. */
     bodyParticleBudget: 5600,
     /** Separación de la retícula de muestreo, en px de referencia a 1920×1080. */
@@ -113,39 +113,52 @@ export const defaultConfig = {
     /** Fracción de celdas ocupadas según proximidad. */
     particleDensity: { far: 0.75, close: 1 },
     particleSize: { idle: 1.7, far: 2.5, close: 2.9 },
-    particleOpacity: { idle: 0.42, far: 0.7, close: 0.95 },
+    particleOpacity: { idle: 0.28, far: 0.68, close: 0.95 },
     /** Desorden dentro de cada celda (0 = retícula perfecta). */
     cellJitter: 0.8,
     /** Amplitud del temblor vivo de cada partícula sobre el cuerpo (px). */
-    particleNoise: 1.3,
-    particleAttraction: 0.14,
-    particleDamping: 0.64,
+    particleNoise: 0.9,
+    particleAttraction: 0.16,
+    particleDamping: 0.6,
     /** Resorte temporal para mover una partícula ya formada hacia su nuevo target. */
-    trackingAttraction: 0.32,
-    trackingDamping: 0.68,
-    trackingResponseMs: 140,
+    trackingAttraction: 0.45,
+    trackingDamping: 0.38,
+    trackingResponseMs: 100,
+    /** Predicción corta del track. 0 desactiva completamente el adelanto. */
+    predictionMs: 36,
+    predictionMaxDistance: 26,
+    predictionSmoothingMs: 75,
+    /** Tolera una pérdida aislada de segmentación sin dispersar el cuerpo. */
+    occlusionGraceMs: 120,
     /** Distancia máxima de transporte intra-persona, en px de referencia. */
     trackingSearchRadius: 360,
-    maxSpeed: 40,
-    formationDuration: 850,
+    maxSpeed: 56,
+    formationDuration: 780,
     /** Retraso aleatorio de formación (fracción de formationDuration). */
-    formationStagger: 0.45,
-    spawnDistance: { min: 40, max: 240 },
-    dispersionDuration: 1500,
-    releaseKick: 2.4,
+    formationStagger: 0.34,
+    spawnDistance: { min: 32, max: 210 },
+    dispersionDuration: 1750,
+    releaseKick: 1.8,
     /** Fracción de partículas ambientales que se conservan mientras hay personas. */
-    ambientPresenceRatio: 0.55,
-    ambientDrift: 0.012,
-    ambientDamping: 0.962,
-    ambientBrownian: 0.018,
-    ambientAttraction: 0.01,
-    breathingAmount: 0.08,
+    ambientPresenceRatio: 0.5,
+    ambientDrift: 0.009,
+    ambientDamping: 0.968,
+    ambientBrownian: 0.01,
+    ambientAttraction: 0.008,
+    /** Influencia sutil del movimiento corporal y cohesión del campo en idle. */
+    ambientMotionInfluence: 0.08,
+    ambientCohesion: 0.000018,
+    breathingAmount: 0.055,
     /** Brillo extra del contorno para reforzar el reconocimiento de la silueta. */
-    edgeBrightness: 1.35,
+    edgeBrightness: 1.28,
     /** Onda del gesto de mano: px/ms, ancho del frente (px) y empuje. */
-    waveSpeed: 0.55,
-    waveWidth: 110,
-    waveStrength: 1.8,
+    waveSpeed: 0.5,
+    waveWidth: 125,
+    waveStrength: 1.45,
+    waveOrganicWarp: 0.18,
+    /** Expansión y suspensión parciales del reveal; nunca detienen el tracking. */
+    revealExpansion: 16,
+    revealSuspension: 0.26,
   },
 
   render: {
@@ -156,14 +169,15 @@ export const defaultConfig = {
 
   experience: {
     showDetectedMessage: true,
-    idlePromptDelayMs: 1200,
-    greetingDelayMs: 450,
-    greetingDurationMs: 2600,
-    firstInstructionDelayMs: 3200,
-    instructionTimeout: 9000,
-    secondInstructionDelayMs: 1600,
-    revealDurationMs: 4200,
-    revealScatterMs: 1300,
+    idlePromptDelayMs: 2000,
+    idlePromptDurationMs: 5200,
+    greetingDelayMs: 700,
+    greetingDurationMs: 1800,
+    firstInstructionDelayMs: 4300,
+    instructionTimeout: 6500,
+    secondInstructionDelayMs: 1800,
+    revealDurationMs: 4400,
+    revealScatterMs: 1400,
     gestureCooldown: 350,
     absenceGraceMs: 900,
     /** Si la persona regresa antes de este tiempo, se retoma la secuencia sin repetir el saludo. */
@@ -171,9 +185,9 @@ export const defaultConfig = {
     departureDurationMs: 2800,
     /** Presencia mínima para considerar que hubo interacción (y mostrar la marca al salir). */
     engagedMinMs: 4000,
-    brandAfterRevealMs: 700,
-    brandDurationMs: 5200,
-    brandAfterPresenceMs: 22000,
+    brandAfterRevealMs: 1000,
+    brandDurationMs: 4800,
+    brandAfterPresenceMs: 26000,
   },
 
   texts: {

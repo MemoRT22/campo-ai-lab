@@ -9,6 +9,7 @@ import { CalibrationPanel } from '../ui/CalibrationPanel';
 import { DebugPanel } from '../ui/DebugPanel';
 import { InstructionOverlay } from '../ui/InstructionOverlay';
 import { PrivacyNotice } from '../ui/PrivacyNotice';
+import { sampleTextParticleTargets } from '../ui/TextParticleSampler';
 import { setupKiosk } from '../utils/Kiosk';
 import { PerformanceMonitor } from '../utils/PerformanceMonitor';
 import { CameraVisionSource } from '../vision/CameraVisionSource';
@@ -85,6 +86,7 @@ export class App {
     window.addEventListener('resize', this.resize);
     setupKiosk(this.config, () => this.experience.state === 'idle' && performance.now() - this.idleSince > IDLE_BEFORE_RELOAD_MS);
     if (this.debug) window.addEventListener('keydown', this.handleDebugKey);
+    void document.fonts?.ready.then(() => this.updateRevealTargets());
 
     try {
       this.source.start();
@@ -139,7 +141,18 @@ export class App {
     this.renderer.resize(width, height, window.devicePixelRatio || 1);
     this.field.resize(width, height);
     this.particles.resize(width, height);
+    this.updateRevealTargets();
   };
+
+  private updateRevealTargets(): void {
+    this.particles.setRevealTargets(sampleTextParticleTargets(
+      this.config.texts.revealTitle,
+      this.config.texts.revealSubtitle,
+      window.innerWidth,
+      window.innerHeight,
+      this.config.typography.scale,
+    ));
+  }
 
   private readonly handleDebugKey = (event: KeyboardEvent): void => {
     const now = performance.now();

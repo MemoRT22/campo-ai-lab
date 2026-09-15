@@ -61,5 +61,16 @@ describe('TargetField temporal ownership', () => {
     expect(field.peopleId[0]).toBe(11);
     expect(field.peopleDx[0]).toBeGreaterThan(0);
     expect(field.peopleDy[0]).toBeCloseTo(0);
+    expect(field.peopleSpeed[0]).toBeGreaterThan(0);
+    expect(field.peoplePredictionActive[0]).toBe(1);
+    expect(field.peoplePredictionX[0]).toBeGreaterThan(0);
+    expect(Math.hypot(field.peoplePredictionX[0], field.peoplePredictionY[0])).toBeLessThanOrEqual(
+      config.particles.predictionMaxDistance * 0.7 + 0.001,
+    );
+
+    // Un cambio brusco de dirección corta la predicción para no sobrepasar el cuerpo.
+    field.update(frame(1, 11, 4, 10), 1099);
+    expect(field.peoplePredictionActive[0]).toBe(0);
+    expect(field.peoplePredictionX[0]).toBe(0);
   });
 });

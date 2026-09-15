@@ -28,6 +28,12 @@ export const CALIBRATION_PATHS = new Set([
   'camera.crop',
   'typography.scale',
   'particles.particleSpacing',
+  'particles.trackingResponseMs',
+  'particles.trackingAttraction',
+  'particles.trackingDamping',
+  'particles.predictionMs',
+  'particles.predictionMaxDistance',
+  'particles.maxSpeed',
 ]);
 
 export function resolveConfig(search: string, storedOverrides: Record<string, unknown> | null = readCalibrationOverrides()): Config {

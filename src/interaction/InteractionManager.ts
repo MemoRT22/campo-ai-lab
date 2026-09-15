@@ -30,7 +30,7 @@ export class InteractionManager {
     if (event.type === 'ONE_HAND_UP') {
       for (const point of event.points) this.waveAt(point, now, 1);
     } else {
-      this.particles.loosen(now, this.config.experience.revealScatterMs, 3);
+      this.particles.celebrate(now, this.config.experience.revealScatterMs, 3);
       for (const point of event.points) this.waveAt(point, now, 1.4);
     }
     this.experience.onGesture(event, now);

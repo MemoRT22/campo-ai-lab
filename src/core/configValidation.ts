@@ -44,11 +44,22 @@ const NUMBER_RULES: Record<string, NumberRule> = {
   'particles.trackingAttraction': { min: 0, max: 2 },
   'particles.trackingDamping': { min: 0.1, max: 0.99 },
   'particles.trackingResponseMs': { min: 16, max: 1000 },
+  'particles.predictionMs': { min: 0, max: 120 },
+  'particles.predictionMaxDistance': { min: 0, max: 120 },
+  'particles.predictionSmoothingMs': { min: 0, max: 1000 },
+  'particles.occlusionGraceMs': { min: 0, max: 1000 },
   'particles.trackingSearchRadius': { min: 20, max: 1000 },
+  'particles.maxSpeed': { min: 1, max: 200 },
+  'particles.ambientMotionInfluence': { min: 0, max: 1 },
+  'particles.ambientCohesion': { min: 0, max: 0.001 },
+  'particles.waveOrganicWarp': { min: 0, max: 0.5 },
+  'particles.revealExpansion': { min: 0, max: 100 },
+  'particles.revealSuspension': { min: 0, max: 0.8 },
   'typography.scale': { min: 0.25, max: 5 },
   'proximity.farSize': { min: 0, max: 1 },
   'proximity.closeSize': { min: 0, max: 2 },
   'experience.gestureCooldown': { min: 0, max: 10000 },
+  'experience.idlePromptDurationMs': { min: 500, max: 30000 },
 };
 
 function get(root: object, path: string): unknown {

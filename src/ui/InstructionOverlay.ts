@@ -16,7 +16,7 @@ export interface InstructionMessage {
   opacity?: number;
 }
 
-const FADE_MS = 700;
+const FADE_MS = 950;
 
 const ICONS: Record<InstructionIcon, string> = {
   none: '',

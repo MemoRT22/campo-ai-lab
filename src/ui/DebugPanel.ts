@@ -149,6 +149,15 @@ export class DebugPanel {
     const { perf, particles, source, experience, interaction, gestures, field, errors } = this.ctx;
     const status = source.status;
     const gesture = interaction.lastGesture;
+    let predictionCount = 0;
+    const motion: string[] = [];
+    for (let i = 0; i < field.peopleCount; i++) {
+      if (field.peoplePredictionActive[i] === 1) predictionCount++;
+      motion.push(
+        `#${field.peopleId[i]} ${field.peopleSpeed[i].toFixed(0)} px/s` +
+        ` · pred ${Math.hypot(field.peoplePredictionX[i], field.peoplePredictionY[i]).toFixed(1)} px`,
+      );
+    }
     const lines = [
       `render      ${perf.renderFps.toFixed(0)} fps · js ${perf.frameMs.toFixed(2)} ms`,
       `cámara      ${status.cameraFps.toFixed(1)} fps · ${status.camera}${status.cameraDetail ? ` · ${status.cameraDetail}` : ''}`,
@@ -157,7 +166,10 @@ export class DebugPanel {
       `máscara     ${perf.maskProcessingMs.toFixed(1)} ms`,
       `pipeline    ${perf.visionLatencyMs.toFixed(0)} ms (captura → resultado; no motion-to-photon)`,
       `partículas  ${particles.renderCount} visibles · ${particles.bodyCount} cuerpo · ${particles.ambientCount} ambiente · ${particles.dormantCount} pool`,
-      `transporte  ${particles.transportedLastFrame} reasignadas · ${particles.formedLastFrame} nuevas · ${particles.releasedLastFrame} liberadas`,
+      `tracking    ${this.ctx.config.particles.trackingResponseMs} ms · prediction ${this.ctx.config.particles.predictionMs} ms · activos ${predictionCount}`,
+      `target lag  ${particles.averageTargetDistance.toFixed(1)} px promedio · ~${particles.estimatedTargetLagMs.toFixed(0)} ms`,
+      `transporte  ${particles.transportedLastFrame} reasignadas · ${particles.releasedLastFrame} liberadas · ${particles.spawnedLastFrame} spawn · ${particles.heldLastFrame} retenidas`,
+      `tracks      ${motion.length ? motion.join(' | ') : '—'}`,
       `personas    ${field.peopleCount}`,
       `estado      ${experience.state.toUpperCase()}`,
       `modelo      ${status.model}${status.delegate ? ` · ${status.delegate}` : ''}${status.labels.length ? ` · [${status.labels.join(', ')}]` : ''}`,

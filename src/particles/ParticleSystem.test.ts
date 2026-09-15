@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { defaultConfig } from '../config';
+import type { VisionFrame } from '../vision/types';
 import { ParticleSystem } from './ParticleSystem';
 import { TargetField } from './TargetField';
 
@@ -17,6 +18,7 @@ interface ParticleInternals {
   mode: Uint8Array;
   particlePersonId: Int32Array;
   cellOwner: Int32Array;
+  revealTarget: Int32Array;
 }
 
 function internals(system: ParticleSystem): ParticleInternals {
@@ -50,6 +52,39 @@ function activateRectangle(
     }
   }
   field.activeCount = count;
+}
+
+function visionFrame(personId: number | null): VisionFrame {
+  const width = 20;
+  const height = 10;
+  const personMap = new Uint8Array(width * height);
+  if (personId !== null) {
+    for (let y = 2; y < 9; y++) for (let x = 5; x < 11; x++) personMap[y * width + x] = 1;
+  }
+  return {
+    width,
+    height,
+    personMap,
+    people: personId === null ? [] : [{
+      id: personId,
+      slot: 0,
+      x0: 0.25,
+      y0: 0.2,
+      x1: 0.55,
+      y1: 0.9,
+      cx: 0.4,
+      cy: 0.55,
+      area: 0.21,
+      proximity: 0.5,
+      confirmed: true,
+    }],
+    timestamp: 0,
+    inferenceMs: 0,
+    processingMs: 0,
+    poses: [],
+    poseTimestamp: null,
+    poseInferenceMs: 0,
+  };
 }
 
 describe('ParticleSystem temporal transport', () => {
@@ -101,6 +136,14 @@ describe('ParticleSystem temporal transport', () => {
       expect(owner).toBeGreaterThanOrEqual(0);
       expect(state.particlePersonId[owner]).toBe(7);
     }
+
+    const cellsBeforeReveal = bodyParticles.map((p) => state.cell[p]);
+    const bondsBeforeReveal = bodyParticles.map((p) => state.bond[p]);
+    system.setRevealTargets(new Float32Array([80, 70, 100, 70, 120, 70]));
+    system.celebrate(1100, 1400, 3);
+    expect(bodyParticles.map((p) => state.cell[p])).toEqual(cellsBeforeReveal);
+    expect(bodyParticles.map((p) => state.bond[p])).toEqual(bondsBeforeReveal);
+    expect(bodyParticles.filter((p) => state.revealTarget[p] >= 0).length).toBeGreaterThan(0);
   });
 
   it('sólo dispersa BODY cuando desaparece el track y no los reutiliza en el mismo frame', () => {
@@ -125,6 +168,38 @@ describe('ParticleSystem temporal transport', () => {
 
     expect(system.transportedLastFrame).toBe(0);
     expect(system.formedLastFrame).toBe(0);
+    expect(system.releasedLastFrame).toBe(bodyCount);
+    expect(Array.from(internals(system).mode).filter((mode) => mode === BODY)).toHaveLength(0);
+  });
+
+  it('tolera una omisión corta de segmentación y después ejecuta departure', () => {
+    const config = structuredClone(defaultConfig);
+    config.camera.mirror = false;
+    config.camera.fit = 'contain';
+    config.particles.particleCount = 300;
+    config.particles.bodyParticleBudget = 300;
+    config.particles.idleParticleCount = 0;
+    config.particles.particleDensity = { far: 1, close: 1 };
+    const field = new TargetField(config);
+    const system = new ParticleSystem(config.particles);
+    field.resize(200, 100);
+    system.resize(200, 100);
+
+    field.update(visionFrame(4), 1000);
+    system.applyTargets(field, 1000);
+    const bodyCount = system.formedLastFrame;
+    expect(bodyCount).toBeGreaterThan(0);
+
+    field.update(visionFrame(null), 1033);
+    system.applyTargets(field, 1033);
+    expect(system.heldLastFrame).toBe(bodyCount);
+    expect(system.releasedLastFrame).toBe(0);
+    expect(Array.from(internals(system).mode).filter((mode) => mode === BODY)).toHaveLength(bodyCount);
+
+    const departureAt = 1000 + config.particles.occlusionGraceMs + 1;
+    field.update(visionFrame(null), departureAt);
+    system.applyTargets(field, departureAt);
+    expect(system.heldLastFrame).toBe(0);
     expect(system.releasedLastFrame).toBe(bodyCount);
     expect(Array.from(internals(system).mode).filter((mode) => mode === BODY)).toHaveLength(0);
   });

@@ -29,6 +29,7 @@ const ATTRACTION_RADIUS = 420;
 const ATTRACTION_INNER_RADIUS = 160;
 const ATTRACTION_WINDOW_MS = 2600;
 const WRAP_MARGIN = 24;
+const TEXT_PARTICLE_RATIO = 0.065;
 
 type ParticleSettings = Config['particles'];
 
@@ -53,7 +54,11 @@ export class ParticleSystem {
   /** Diagnóstico del último frame de visión. */
   transportedLastFrame = 0;
   formedLastFrame = 0;
+  spawnedLastFrame = 0;
   releasedLastFrame = 0;
+  heldLastFrame = 0;
+  averageTargetDistance = 0;
+  estimatedTargetLagMs = 0;
 
   private readonly px: Float32Array;
   private readonly py: Float32Array;
@@ -80,6 +85,7 @@ export class ParticleSystem {
   private readonly dormantStack: Int32Array;
   private readonly transportCandidates: Int32Array;
   private readonly missingByPerson = new Int32Array(8);
+  private readonly revealTarget: Int32Array;
   private dormantTop = 0;
 
   private field: TargetField | null = null;
@@ -108,7 +114,11 @@ export class ParticleSystem {
   private readonly waveStrength = new Float32Array(MAX_WAVES);
   private waveCursor = 0;
   private lastWaveAt = -Infinity;
-  private looseUntil = 0;
+  private celebrationStart = -Infinity;
+  private celebrationDuration = 0;
+  private celebrationStrength = 0;
+  private revealTargets = new Float32Array(0);
+  private revealTargetCount = 0;
 
   constructor(private readonly settings: ParticleSettings) {
     const n = settings.particleCount;
@@ -136,6 +146,7 @@ export class ParticleSystem {
     this.mode = new Uint8Array(n);
     this.dormantStack = new Int32Array(n);
     this.transportCandidates = new Int32Array(n);
+    this.revealTarget = new Int32Array(n).fill(-1);
     this.binItems = new Int32Array(n);
 
     const jitter = settings.cellJitter * 0.5;
@@ -150,6 +161,12 @@ export class ParticleSystem {
 
   get dormantCount(): number {
     return this.dormantTop;
+  }
+
+  /** Targets tipográficos precalculados por UI; se reemplazan sólo al hacer resize. */
+  setRevealTargets(targets: Float32Array): void {
+    this.revealTargets = new Float32Array(targets);
+    this.revealTargetCount = targets.length / 2;
   }
 
   resize(width: number, height: number): void {
@@ -183,7 +200,9 @@ export class ParticleSystem {
 
     this.transportedLastFrame = 0;
     this.formedLastFrame = 0;
+    this.spawnedLastFrame = 0;
     this.releasedLastFrame = 0;
+    this.heldLastFrame = 0;
 
     if (field.peopleCount > 0 && this.presenceSince < 0) this.presenceSince = now;
     else if (field.peopleCount === 0) this.presenceSince = -1;
@@ -198,6 +217,12 @@ export class ParticleSystem {
       if (mode[p] !== BODY) continue;
       const c = cell[p];
       if (c >= 0 && active[c] === 1 && cellPersonId[c] === particlePersonId[p]) continue;
+      // Una omisión aislada del segmentador no equivale a departure. Conservamos el
+      // target anterior durante una ventana corta; clear() elimina el track y no pasa aquí.
+      if (c >= 0 && active[c] === 0 && field.personIndex(particlePersonId[p]) < 0 && field.trackAge(particlePersonId[p], now) <= this.settings.occlusionGraceMs) {
+        this.heldLastFrame++;
+        continue;
+      }
       if (c >= 0) cellOwner[c] = -1;
       transportCandidates[candidateCount++] = p;
     }
@@ -257,11 +282,13 @@ export class ParticleSystem {
       if (cellOwner[c] >= 0) continue;
 
       let p = this.takeFree(cellX[c], cellY[c]);
+      let spawned = false;
       if (p >= 0) {
         if (this.bond[p] < 0.05) this.bond[p] = -this.random() * stagger;
       } else if (this.dormantTop > 0) {
         p = this.dormantStack[--this.dormantTop];
         this.spawnNear(p, cellX[c], cellY[c]);
+        spawned = true;
       } else {
         continue;
       }
@@ -273,6 +300,7 @@ export class ParticleSystem {
       this.retargetedAt[p] = -Infinity;
       this.lifeTarget[p] = 1;
       this.formedLastFrame++;
+      if (spawned) this.spawnedLastFrame++;
     }
 
     for (let i = 0; i < candidateCount; i++) {
@@ -294,7 +322,7 @@ export class ParticleSystem {
     this.flow.update(now);
     const flow = this.flow;
     const field = this.field;
-    const { px, py, vx, vy, bond, life, lifeTarget, fadeMs, mode, cell, excite, glow, proximity, seed, phase, jitterX, jitterY, releasedAt, retargetedAt } = this;
+    const { px, py, vx, vy, bond, life, lifeTarget, fadeMs, mode, cell, excite, glow, proximity, seed, phase, jitterX, jitterY, releasedAt, retargetedAt, particlePersonId } = this;
     const renderData = this.renderData;
 
     const scale = this.scale;
@@ -315,16 +343,25 @@ export class ParticleSystem {
     const dispersionStep = dtMs / s.dispersionDuration;
     const formationFadeMs = s.formationDuration * 0.6;
     const fadeDelayMs = s.dispersionDuration * 0.2;
-    const bondFrozen = now < this.looseUntil;
     const exciteDecay = Math.exp(-dtMs / EXCITE_DECAY_MS);
     const glowAlpha = 1 - Math.exp(-dtMs / GLOW_SMOOTHING_MS);
     const time = now * 0.001;
     const wavesActive = now - this.lastWaveAt < WAVE_LIFETIME_MS;
     const waveSpeed = s.waveSpeed * scale;
     const waveWidth = s.waveWidth * scale;
+    const celebrationProgress = this.celebrationDuration > 0 ? (now - this.celebrationStart) / this.celebrationDuration : -1;
+    const celebrationEnvelope = celebrationProgress >= 0 && celebrationProgress <= 1 ? Math.sin(celebrationProgress * Math.PI) : 0;
+    let textEnvelope = 0;
+    if (celebrationProgress >= 0.16 && celebrationProgress < 0.82) {
+      const rise = Math.min(1, (celebrationProgress - 0.16) / 0.18);
+      const fall = Math.min(1, (0.82 - celebrationProgress) / 0.2);
+      textEnvelope = Math.min(rise, fall);
+      textEnvelope = textEnvelope * textEnvelope * (3 - 2 * textEnvelope);
+    }
 
     const attractionRadiusSq = (ATTRACTION_RADIUS * scale) ** 2;
     const innerRadius = ATTRACTION_INNER_RADIUS * scale;
+    const motionRadiusSq = (280 * scale) ** 2;
     let attraction = 0;
     if (peopleCount > 0 && this.presenceSince >= 0) {
       const elapsed = now - this.presenceSince;
@@ -337,6 +374,8 @@ export class ParticleSystem {
     let out = 0;
     let bodyCount = 0;
     let ambientVisible = 0;
+    let targetDistanceTotal = 0;
+    let targetDistanceSamples = 0;
 
     for (let p = 0; p < this.capacity; p++) {
       const m = mode[p];
@@ -362,23 +401,52 @@ export class ParticleSystem {
 
       if (m === BODY && cellX && cellY && cellProximity && cellEdge) {
         bodyCount++;
-        if (!bondFrozen && b < 1) b = Math.min(1, b + formationStep);
+        if (b < 1) b = Math.min(1, b + formationStep);
         const bc = b < 0 ? 0 : b;
         const ease = bc * bc * (3 - 2 * bc);
         const c = cell[p];
-        const tx = cellX[c] + jitterX[p] * spacing + noiseAmplitude * Math.sin(time * (0.9 + sd * 0.8) + phase[p]);
-        const ty = cellY[c] + jitterY[p] * spacing + noiseAmplitude * Math.cos(time * (0.7 + sd * 0.9) + phase[p] * 1.7);
+        const personIndex = field ? field.personIndex(particlePersonId[p]) : -1;
+        let tx = cellX[c] + jitterX[p] * spacing + noiseAmplitude * Math.sin(time * (0.9 + sd * 0.8) + phase[p]);
+        let ty = cellY[c] + jitterY[p] * spacing + noiseAmplitude * Math.cos(time * (0.7 + sd * 0.9) + phase[p] * 1.7);
+        if (field && personIndex >= 0) {
+          // La predicción desplaza el target, nunca la posición de la partícula. `ease`
+          // impide que altere la entrada cinematográfica de una persona nueva.
+          tx += field.peoplePredictionX[personIndex] * ease;
+          ty += field.peoplePredictionY[personIndex] * ease;
+          if (celebrationEnvelope > 0) {
+            const dx = cellX[c] - field.peopleX[personIndex];
+            const dy = cellY[c] - field.peopleY[personIndex];
+            const distance = Math.hypot(dx, dy) + 0.001;
+            const strength = Math.min(1.3, 0.5 + this.celebrationStrength * 0.2);
+            const expansion = s.revealExpansion * scale * celebrationEnvelope * ease * strength * (0.72 + sd * 0.28);
+            tx += (dx / distance) * expansion;
+            ty += (dy / distance) * expansion;
+            e = Math.max(e, celebrationEnvelope * (0.32 + sd * 0.18));
+          }
+        }
+        const revealIndex = this.revealTarget[p];
+        if (textEnvelope > 0 && revealIndex >= 0 && revealIndex < this.revealTargetCount) {
+          const targetOffset = revealIndex * 2;
+          const textBlend = textEnvelope * 0.82;
+          tx = lerp(tx, this.revealTargets[targetOffset], textBlend);
+          ty = lerp(ty, this.revealTargets[targetOffset + 1], textBlend);
+          e = Math.max(e, textEnvelope * 0.72);
+        }
 
         flow.sample(x, y);
         // Mientras el enlace es débil la partícula todavía "nada" en el campo y se curva al llegar.
         const swirl = (1 - ease) * s.ambientDrift * 6;
         const trackingAge = now - retargetedAt[p];
-        const trackingBlend = trackingAge >= 0 && trackingAge < s.trackingResponseMs
+        const retargetBlend = trackingAge >= 0 && trackingAge < s.trackingResponseMs
           ? 1 - trackingAge / s.trackingResponseMs
           : 0;
+        const trackSpeed = field && personIndex >= 0 ? field.peopleSpeed[personIndex] : 0;
+        const motionBlend = Math.min(0.78, Math.max(0, (trackSpeed - 60 * scale) / (1100 * scale)));
+        const trackingBlend = Math.max(retargetBlend, motionBlend);
         const bodyAttraction = lerp(s.particleAttraction, s.trackingAttraction, trackingBlend);
         const responsiveDamping = lerp(bodyDamping, trackingDamping, trackingBlend);
-        const k = bodyAttraction * ease;
+        const suspension = 1 - celebrationEnvelope * s.revealSuspension;
+        const k = bodyAttraction * ease * suspension;
         const damping = ambientDamping + (responsiveDamping - ambientDamping) * ease;
         for (let i = 0; i < substeps; i++) {
           velX = (velX + ((tx - x) * k + flow.sampleX * swirl) * h) * damping;
@@ -391,6 +459,10 @@ export class ParticleSystem {
           }
           x += velX * h;
           y += velY * h;
+        }
+        if (!(textEnvelope > 0 && revealIndex >= 0)) {
+          targetDistanceTotal += Math.hypot(tx - x, ty - y);
+          targetDistanceSamples++;
         }
 
         const prox = cellProximity[c];
@@ -405,9 +477,24 @@ export class ParticleSystem {
         const sinceRelease = now - releasedAt[p];
         const dispersing = releasedAt[p] > 0 && sinceRelease < s.dispersionDuration ? 1 - sinceRelease / s.dispersionDuration : 0;
         flow.sample(x, y);
-        const drift = s.ambientDrift * scale * (1 + dispersing * 5);
+        const depth = 0.55 + sd * 0.75;
+        const drift = s.ambientDrift * scale * depth * (1 + dispersing * 5);
         let ax = flow.sampleX * drift + (this.random() - 0.5) * s.ambientBrownian * scale;
         let ay = flow.sampleY * drift + (this.random() - 0.5) * s.ambientBrownian * scale;
+
+        if (peopleCount === 0 && dispersing < 0.1) {
+          // Tres pozos muy lentos comparten el mismo campo de flujo. Dan respiración y
+          // profundidad al idle sin vecinos por partícula ni coste cuadrático.
+          const layer = Math.min(2, (sd * 3) | 0);
+          const anchorX = this.width * (0.22 + layer * 0.28 + Math.sin(time * 0.09 + layer * 2.1) * 0.055);
+          const anchorY = this.height * (0.38 + (layer & 1) * 0.23 + Math.cos(time * 0.075 + layer * 1.7) * 0.07);
+          const dx = anchorX - x;
+          const dy = anchorY - y;
+          const cohesionRadiusSq = (360 * scale) ** 2;
+          const force = s.ambientCohesion / (1 + (dx * dx + dy * dy) / cohesionRadiusSq);
+          ax += dx * force;
+          ay += dy * force;
+        }
 
         if (attraction > 0 && dispersing < 0.3 && field) {
           for (let k = 0; k < peopleCount; k++) {
@@ -419,6 +506,9 @@ export class ParticleSystem {
             const force = (attraction * scale * inner) / (1 + distSq / attractionRadiusSq);
             ax += (dx / dist) * force;
             ay += (dy / dist) * force;
+            const wake = Math.max(0, 1 - distSq / motionRadiusSq);
+            ax += field.peopleVx[k] * FRAME_MS * s.ambientMotionInfluence * wake;
+            ay += field.peopleVy[k] * FRAME_MS * s.ambientMotionInfluence * wake;
           }
         }
 
@@ -451,17 +541,22 @@ export class ParticleSystem {
           const dx = x - this.waveX[w];
           const dy = y - this.waveY[w];
           const dist = Math.sqrt(dx * dx + dy * dy) + 0.001;
-          const offset = Math.abs(dist - age * waveSpeed);
+          const angle = Math.atan2(dy, dx);
+          const warp = waveWidth * s.waveOrganicWarp * (
+            Math.sin(angle * 3.1 + phase[p] + age * 0.004) * 0.66 +
+            Math.sin(angle * 5.3 - phase[p] * 0.7 - age * 0.0025) * 0.34
+          );
+          const offset = Math.abs(dist + warp - age * waveSpeed);
           if (offset >= waveWidth) continue;
           // Perfil coseno: frente suave, sin borde duro.
           const falloff = 0.5 + 0.5 * Math.cos((offset / waveWidth) * Math.PI);
           const life = 1 - age / WAVE_LIFETIME_MS;
           const envelope = life * life;
           const push = falloff * envelope * this.waveStrength[w] * scale * (m === BODY ? 1 : WAVE_AMBIENT_FACTOR);
-          velX += (dx / dist) * push;
-          velY += (dy / dist) * push;
+          const curl = Math.sin(angle * 2 + phase[p] + age * 0.005) * push * 0.16;
+          velX += (dx / dist) * push - (dy / dist) * curl;
+          velY += (dy / dist) * push + (dx / dist) * curl;
           e = Math.max(e, falloff * envelope);
-          if (m === BODY) b = Math.min(b, 0.55 + 0.45 * (1 - falloff));
         }
       }
 
@@ -474,7 +569,7 @@ export class ParticleSystem {
 
       const vis = b <= 0 ? 0 : b >= 1 ? 1 : b;
       const idleSize = sizeIdle * (0.55 + sd * 0.9);
-      const twinkle = 0.65 + 0.35 * Math.sin(time * (0.4 + sd * 0.6) + phase[p]);
+      const twinkle = 0.78 + 0.22 * Math.sin(time * (0.32 + sd * 0.5) + phase[p]);
       let size = idleSize;
       let alpha = opacityIdle * twinkle;
       if (vis > 0) {
@@ -496,6 +591,15 @@ export class ParticleSystem {
     this.renderCount = out / RENDER_STRIDE;
     this.bodyCount = bodyCount;
     this.ambientCount = ambientVisible;
+    this.averageTargetDistance = targetDistanceSamples > 0 ? targetDistanceTotal / targetDistanceSamples : 0;
+    let averageTrackSpeed = 0;
+    if (field && field.peopleCount > 0) {
+      for (let i = 0; i < field.peopleCount; i++) averageTrackSpeed += field.peopleSpeed[i] / 1000;
+      averageTrackSpeed /= field.peopleCount;
+    }
+    this.estimatedTargetLagMs = averageTrackSpeed > 0.04
+      ? Math.min(1000, this.averageTargetDistance / averageTrackSpeed)
+      : 0;
 
     if (now - this.lastPopulationAt >= POPULATION_INTERVAL_MS) {
       this.lastPopulationAt = now;
@@ -513,33 +617,34 @@ export class ParticleSystem {
     this.lastWaveAt = now;
   }
 
-  /** Afloja todas las siluetas: las partículas se alejan y vuelven a formarse al terminar. */
-  loosen(now: number, durationMs: number, strength: number): void {
+  /** Expansión suspendida para BOTH_HANDS_UP. El enlace y el tracking nunca se interrumpen. */
+  celebrate(now: number, durationMs: number, strength: number): void {
     const field = this.field;
-    this.looseUntil = now + durationMs;
+    this.celebrationStart = now;
+    this.celebrationDuration = Math.max(1, durationMs);
+    this.celebrationStrength = strength;
+    this.revealTarget.fill(-1);
+    let revealCursor = 0;
     for (let p = 0; p < this.capacity; p++) {
       if (this.mode[p] !== BODY) continue;
-      this.bond[p] = Math.min(this.bond[p], 0.22);
+      if (this.revealTargetCount > 0 && this.bond[p] > 0.72 && this.seed[p] < TEXT_PARTICLE_RATIO) {
+        this.revealTarget[p] = (revealCursor * 37) % this.revealTargetCount;
+        revealCursor++;
+      }
       let dx = this.random() - 0.5;
       let dy = this.random() - 0.5;
-      if (field && field.peopleCount > 0) {
-        let best = Infinity;
-        for (let k = 0; k < field.peopleCount; k++) {
-          const ddx = this.px[p] - field.peopleX[k];
-          const ddy = this.py[p] - field.peopleY[k];
-          const d = ddx * ddx + ddy * ddy;
-          if (d < best) {
-            best = d;
-            dx = ddx;
-            dy = ddy;
-          }
+      if (field) {
+        const personIndex = field.personIndex(this.particlePersonId[p]);
+        if (personIndex >= 0) {
+          dx = this.px[p] - field.peopleX[personIndex];
+          dy = this.py[p] - field.peopleY[personIndex];
         }
       }
       const dist = Math.sqrt(dx * dx + dy * dy) + 0.001;
-      const kick = strength * this.scale * (0.4 + this.random() * 0.8);
+      const kick = strength * this.scale * (0.12 + this.random() * 0.22);
       this.vx[p] += (dx / dist) * kick;
       this.vy[p] += (dy / dist) * kick;
-      this.excite[p] = Math.max(this.excite[p], 0.5);
+      this.excite[p] = Math.max(this.excite[p], 0.58);
     }
   }
 

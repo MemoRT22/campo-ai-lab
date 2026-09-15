@@ -148,7 +148,15 @@ export class Experience {
     if (!this.idlePromptShown && elapsed > this.config.experience.idlePromptDelayMs) {
       this.idlePromptShown = true;
       this.overlay.show(
-        { id: ID.idle, message: this.config.texts.idlePrompt, placement: 'center', variant: 'prompt', priority: PRIORITY.idle, opacity: 0.62 },
+        {
+          id: ID.idle,
+          message: this.config.texts.idlePrompt,
+          placement: 'center',
+          variant: 'prompt',
+          timeout: this.config.experience.idlePromptDurationMs,
+          priority: PRIORITY.idle,
+          opacity: 0.46,
+        },
         now,
       );
     }

@@ -73,7 +73,7 @@ Todo vive en [`src/config.ts`](src/config.ts). No hay números mágicos repartid
 | `vision` | FPS independientes de segmentación/Pose, ancho, delegado GPU/CPU, umbrales, suavizado, área mínima, `maxPeople`, watchdog y fallback |
 | `gestures` | Visibilidad, margen, suavizado, histéresis, tiempos mínimos y gracia de ausencia |
 | `proximity` | Qué tamaño aparente cuenta como lejos o cerca |
-| `particles` | `particleCount`, `idleParticleCount`, `particleSpacing`, `particleDensity`, `particleSize`, `particleOpacity`, `particleNoise`, `particleAttraction`, `particleDamping`, `formationDuration`, `dispersionDuration`, onda de gesto |
+| `particles` | Pool, densidad, formación, tracking, predicción, transporte, ambiente, departure y reacciones gestuales |
 | `experience` | Tiempos de la narrativa: saludo, instrucciones, `instructionTimeout`, `gestureCooldown`, gracia de ausencia, marca |
 | `texts` | Todos los textos en pantalla |
 | `branding` | `showBranding`, `brandName`, `labName`, `tagline`, `logoEnabled`, `logoPath` |
@@ -96,6 +96,33 @@ Todo vive en [`src/config.ts`](src/config.ts). No hay números mágicos repartid
 2. Revisar la máscara con distintas luces (mañana, tarde, noche).
 3. Ajustar `maskThreshold`, `minPersonArea` y `crop` hasta que reflejos y sombras dejen de aparecer.
 4. Subir `typography.scale` hasta que el texto se lea a la distancia real.
+
+### Ajustes finales de mirror feel
+
+Los valores de partida de esta iteración separan deliberadamente formación y seguimiento:
+
+| Parámetro | Valor | Función |
+| --- | ---: | --- |
+| `vision.smoothingAttackMs` | 22 ms | Adquisición rápida de nuevas zonas del cuerpo |
+| `vision.smoothingReleaseMs` | 65 ms | Evita la cola de máscara sin hacer vibrar el contorno |
+| `particles.formationDuration` | 780 ms | Entrada inicial cinematográfica |
+| `particles.trackingResponseMs` | 100 ms | Ventana del resorte rápido BODY → BODY |
+| `particles.trackingAttraction` | 0.45 | Recuperación rápida del target |
+| `particles.trackingDamping` | 0.38 | Frena overshoot al llegar |
+| `particles.maxSpeed` | 56 | Permite que extremidades alcancen targets lejanos |
+| `particles.predictionMs` | 36 ms | Compensa una parte de la latencia de visión |
+| `particles.predictionMaxDistance` | 26 px | Límite duro contra overshoot |
+| `particles.occlusionGraceMs` | 120 ms | Ignora una omisión aislada de segmentación |
+
+La predicción sólo se activa después de tres muestras estables. Se cancela ante saltos o cambios bruscos de dirección y puede desactivarse con `?particles.predictionMs=0`. El panel `?debug=true` muestra velocidad, adelanto aplicado, distancia media al target y lag estimado.
+
+Para afinar con la cámara real, usar `?calibrate=true` y probar caminar, detenerse y cambiar de dirección:
+
+1. Si todo el cuerpo queda atrás pero no vibra, probar `trackingResponseMs` entre 80–100 ms.
+2. Si se adelanta al detenerse, bajar `predictionMs` a 20–28 ms o ponerlo en `0`.
+3. Si el contorno deja una estela, bajar `smoothingReleaseMs` hacia 50–60 ms; si parpadea, subirlo hacia 75–90 ms.
+4. Si las manos tardan en completar un movimiento grande, subir gradualmente `maxSpeed`; si rebotan, bajar `trackingDamping` ligeramente (un valor menor amortigua más).
+5. Verificar motion-to-photon con video externo; `pipeline` mide captura → resultado y no incluye pantalla/cámara físicas.
 
 ## Pantalla completa y modo kiosko
 
@@ -207,7 +234,9 @@ src/
 - **Gestos por flanco.** Mantener una mano arriba no repite el evento. Bajarla rearma el gesto; la ausencia breve conserva el estado.
 - **Fallback estable.** Varios fallos GPU reinician el worker y fijan CPU durante el resto de la sesión, sin alternar delegados.
 - **WebGL2 directo, no Three.js ni PixiJS.** Es una sola primitiva (puntos suaves con mezcla aditiva) en un solo draw call. Una librería de escena no aporta nada aquí y Canvas 2D no escala a miles de puntos suaves en pantallas grandes.
-- **Retícula estable.** Cada partícula es dueña de una celda fija de pantalla. Si la persona está quieta, nada se mueve salvo la "respiración". Al moverse, sólo migran las partículas de las celdas que cambian, hacia las más cercanas. Remuestrear la máscara en cada frame haría que la silueta "hierva".
+- **Retícula estable con transporte temporal.** Cada partícula conserva celda y `personId` mientras son válidos. Cuando cambia la postura, los BODY sin celda se reasignan primero a targets del mismo track usando desplazamiento y vecindad espacial; sólo se recurre al ambiente después. Posición, velocidad, `bond`, vida y brillo sobreviven al cambio.
+- **Predicción conservadora.** La velocidad filtrada del track adelanta el target unos milisegundos, con estabilidad mínima, límite espacial y corte por salto/reversión. No es optical flow ni reconocimiento de identidad.
+- **Reveal sin congelar el cuerpo.** BOTH_HANDS_UP expande y suspende parcialmente el resorte; una fracción pequeña de BODY particles refuerza la tipografía y regresa a su celda mientras el resto mantiene tracking.
 - **Sin React.** No hay estado de UI que lo justifique.
 
 ### Estados
