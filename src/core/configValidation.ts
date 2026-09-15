@@ -78,6 +78,17 @@ const NUMBER_RULES: Record<string, NumberRule> = {
   'particles.revealExpansion': { min: 0, max: 100 },
   'particles.revealSuspension': { min: 0, max: 0.8 },
   'typography.scale': { min: 0.25, max: 5 },
+  'layout.sideColumnWidth': { min: 0.1, max: 0.45 },
+  'layout.columnFill': { min: 0.3, max: 1 },
+  'layout.textBandTop': { min: 0, max: 0.9 },
+  'layout.textBandBottom': { min: 0.1, max: 1 },
+  'layout.topBand.top': { min: 0, max: 0.9 },
+  'layout.topBand.bottom': { min: 0.05, max: 1 },
+  'layout.topBand.width': { min: 0.1, max: 1 },
+  'layout.maxOccupancy': { min: 0, max: 1 },
+  'layout.switchMargin': { min: 0, max: 1 },
+  'layout.occupancySmoothingMs': { min: 0, max: 5000 },
+  'layout.minSideAspect': { min: 0.5, max: 4 },
   'proximity.farSize': { min: 0, max: 1 },
   'proximity.closeSize': { min: 0, max: 2 },
   'experience.gestureCooldown': { min: 0, max: 10000 },
@@ -147,6 +158,11 @@ export function validateConfig(input: Config): Config {
   config.vision.poseFPS = Math.min(config.vision.poseFPS, config.vision.processingFPS);
   config.particles.idleParticleCount = Math.min(config.particles.idleParticleCount, config.particles.particleCount);
   config.particles.bodyParticleBudget = Math.min(config.particles.bodyParticleBudget, config.particles.particleCount);
+  if (config.layout.textBandBottom <= config.layout.textBandTop) {
+    config.layout.textBandTop = defaultConfig.layout.textBandTop;
+    config.layout.textBandBottom = defaultConfig.layout.textBandBottom;
+  }
+  if (config.layout.topBand.bottom <= config.layout.topBand.top) config.layout.topBand = { ...defaultConfig.layout.topBand };
   if (config.particles.fastMotionSpeed.full <= config.particles.fastMotionSpeed.start) {
     config.particles.fastMotionSpeed = { ...defaultConfig.particles.fastMotionSpeed };
   }

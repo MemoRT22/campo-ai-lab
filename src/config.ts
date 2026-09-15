@@ -247,11 +247,14 @@ export const defaultConfig = {
     idlePromptDurationMs: 5200,
     /** Tiempo entre apariciones de ACÉRCATE mientras nadie está presente. */
     idlePromptIntervalMs: 15000,
-    greetingDelayMs: 700,
-    greetingDurationMs: 1800,
-    firstInstructionDelayMs: 4300,
-    instructionTimeout: 6500,
-    secondInstructionDelayMs: 1800,
+    /** El saludo espera a que la silueta termine de formarse. */
+    greetingDelayMs: 950,
+    greetingDurationMs: 2400,
+    /** Saludo → fundido → silencio → primera instrucción. */
+    firstInstructionDelayMs: 5200,
+    instructionTimeout: 7000,
+    /** Deja terminar la onda de la mano antes de pedir las dos. */
+    secondInstructionDelayMs: 1500,
     revealDurationMs: 4400,
     revealScatterMs: 1400,
     gestureCooldown: 350,
@@ -290,6 +293,25 @@ export const defaultConfig = {
     intervalMs: 45000,
     durationMs: 8000,
     presenceDelayMs: 5000,
+  },
+
+  layout: {
+    /** Columnas laterales de espacio negativo (fracción del ancho) donde vive el texto con personas. */
+    sideColumnWidth: 0.28,
+    /** Fracción de la columna que puede ocupar el texto. */
+    columnFill: 0.86,
+    /** Banda vertical de las columnas donde se mide la ocupación y se centra el texto. */
+    textBandTop: 0.3,
+    textBandBottom: 0.7,
+    /** Franja superior alternativa para mensajes que no piden levantar las manos. */
+    topBand: { top: 0.06, bottom: 0.2, width: 0.5 },
+    /** Ocupación (0..1) desde la que una columna se considera en conflicto con la silueta. */
+    maxOccupancy: 0.1,
+    /** Diferencia mínima de ocupación para cambiar de lado (evita alternar). */
+    switchMargin: 0.08,
+    occupancySmoothingMs: 450,
+    /** Por debajo de esta proporción ancho/alto no hay columnas laterales útiles. */
+    minSideAspect: 1.2,
   },
 
   typography: {

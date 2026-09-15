@@ -129,7 +129,8 @@ export class Experience {
           id: ID.reveal,
           message: texts.revealTitle,
           subMessage: texts.revealSubtitle,
-          placement: 'center',
+          placement: 'auto',
+          kind: 'title',
           variant: 'title',
           timeout: experience.revealDurationMs,
           priority: PRIORITY.reveal,
@@ -191,7 +192,16 @@ export class Experience {
       session.greeted = true;
       if (experience.showDetectedMessage) {
         this.overlay.show(
-          { id: ID.greeting, message: texts.detected, placement: 'lower', timeout: experience.greetingDurationMs, priority: PRIORITY.greeting },
+          {
+            id: ID.greeting,
+            message: texts.detected,
+            placement: 'auto',
+            kind: 'message',
+            variant: 'message',
+            timeout: experience.greetingDurationMs,
+            priority: PRIORITY.greeting,
+            opacity: 0.66,
+          },
           now,
         );
       }
@@ -200,7 +210,7 @@ export class Experience {
     if (!session.firstHint && t > experience.firstInstructionDelayMs) {
       session.firstHint = true;
       if (session.gestureOneAt < 0) this.overlay.show(
-        { id: ID.raiseHand, message: texts.raiseHand, icon: 'raise-hand', placement: 'lower', timeout: experience.instructionTimeout, priority: PRIORITY.hint },
+        { id: ID.raiseHand, message: texts.raiseHand, icon: 'raise-hand', placement: 'auto', kind: 'hint', timeout: experience.instructionTimeout, priority: PRIORITY.hint },
         now,
       );
     }
@@ -208,7 +218,7 @@ export class Experience {
     if (session.gestureOneAt >= 0 && !session.secondHint && now - session.gestureOneAt > experience.secondInstructionDelayMs) {
       session.secondHint = true;
       this.overlay.show(
-        { id: ID.tryBoth, message: texts.tryBoth, icon: 'raise-hand', placement: 'lower', timeout: experience.instructionTimeout, priority: PRIORITY.hint },
+        { id: ID.tryBoth, message: texts.tryBoth, icon: 'raise-hand', placement: 'auto', kind: 'hint', timeout: experience.instructionTimeout, priority: PRIORITY.hint },
         now,
       );
     }
@@ -218,7 +228,7 @@ export class Experience {
       const afterLongStay = t > experience.brandAfterPresenceMs && this.overlay.activeId === null;
       if (afterReveal || afterLongStay) {
         session.brandShown = true;
-        this.brand.show(now, experience.brandDurationMs, 'lower');
+        this.brand.show(now, experience.brandDurationMs, 'auto');
       }
     }
   }

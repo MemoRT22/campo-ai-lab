@@ -8,6 +8,7 @@ import { BrandOverlay } from '../ui/BrandOverlay';
 import { CalibrationPanel } from '../ui/CalibrationPanel';
 import { DebugPanel } from '../ui/DebugPanel';
 import { InstructionOverlay } from '../ui/InstructionOverlay';
+import { NegativeSpaceLayout } from '../ui/NegativeSpaceLayout';
 import { PrivacyNotice } from '../ui/PrivacyNotice';
 import { sampleTextParticleTargets } from '../ui/TextParticleSampler';
 import { setupKiosk } from '../utils/Kiosk';
@@ -32,6 +33,7 @@ export class App {
   private readonly experience: Experience;
   private readonly interaction: InteractionManager;
   private readonly gestures: GestureRecognizer;
+  private readonly layout: NegativeSpaceLayout;
   private readonly source: VisionSource;
   private readonly perf = new PerformanceMonitor();
   private readonly debug: DebugPanel | null = null;
@@ -49,8 +51,10 @@ export class App {
     this.renderer = new Renderer(canvas, config.render, config.particles.particleCount);
     this.field = new TargetField(config);
     this.particles = new ParticleSystem(config.particles);
-    const overlay = new InstructionOverlay(overlayRoot);
-    const brand = new BrandOverlay(overlayRoot, config.branding);
+    this.layout = new NegativeSpaceLayout(config.layout);
+    const resolvePlacement = this.layout.resolve.bind(this.layout);
+    const overlay = new InstructionOverlay(overlayRoot, resolvePlacement);
+    const brand = new BrandOverlay(overlayRoot, config.branding, resolvePlacement);
     const privacy = new PrivacyNotice(overlayRoot, config.privacy, config.texts.privacy);
     this.experience = new Experience(config, overlay, brand, privacy, now);
     this.interaction = new InteractionManager(config, this.particles, this.field, this.experience);
@@ -72,6 +76,7 @@ export class App {
         interaction: this.interaction,
         gestures: this.gestures,
         field: this.field,
+        layout: this.layout,
         errors: this.errors,
       });
     }
@@ -109,6 +114,7 @@ export class App {
       const frame = this.source.takeFrame();
       if (frame) {
         this.field.update(frame, now);
+        this.layout.update(this.field, now);
         this.particles.applyTargets(this.field, now);
         this.perf.recordVision(frame.inferenceMs, frame.processingMs, frame.timestamp, now);
         if (frame.poseTimestamp !== null) {
@@ -119,6 +125,7 @@ export class App {
       } else if ((this.field.activeCount > 0 || this.field.peopleCount > 0) && now - this.source.lastFrameAt > this.config.vision.staleFrameMs) {
         // Visión detenida: no dejar una silueta congelada en pantalla.
         this.field.clear();
+        this.layout.update(this.field, now);
         this.particles.applyTargets(this.field, now);
         this.gestures.reset();
       }
@@ -140,6 +147,7 @@ export class App {
     const height = window.innerHeight;
     this.renderer.resize(width, height, window.devicePixelRatio || 1);
     this.field.resize(width, height);
+    this.layout.update(this.field, performance.now());
     this.particles.resize(width, height);
     this.updateRevealTargets();
   };

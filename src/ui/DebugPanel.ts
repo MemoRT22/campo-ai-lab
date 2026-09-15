@@ -5,6 +5,7 @@ import type { GestureRecognizer } from '../interaction/GestureRecognizer';
 import type { ParticleSystem } from '../particles/ParticleSystem';
 import type { TargetField } from '../particles/TargetField';
 import type { PerformanceMonitor } from '../utils/PerformanceMonitor';
+import type { NegativeSpaceLayout } from './NegativeSpaceLayout';
 import type { VisionFrame, VisionSource } from '../vision/types';
 
 const TEXT_INTERVAL_MS = 250;
@@ -33,6 +34,7 @@ export interface DebugContext {
   interaction: InteractionManager;
   gestures: GestureRecognizer;
   field: TargetField;
+  layout: NegativeSpaceLayout;
   errors: string[];
 }
 
@@ -167,6 +169,7 @@ export class DebugPanel {
       `pipeline    ${perf.visionLatencyMs.toFixed(0)} ms (captura → resultado; no motion-to-photon)`,
       `partículas  ${particles.renderCount} visibles · ${particles.bodyCount} cuerpo · ${particles.ambientCount} ambiente · ${particles.dormantCount} pool`,
       `tracking    ${this.ctx.config.particles.trackingResponseMs} ms · prediction ${this.ctx.config.particles.predictionMs} ms · activos ${predictionCount}`,
+      `texto       lado ${this.ctx.layout.side} · ocupación izq ${(this.ctx.layout.occupancyLeft * 100).toFixed(0)}% · der ${(this.ctx.layout.occupancyRight * 100).toFixed(0)}% · arriba ${(this.ctx.layout.occupancyTop * 100).toFixed(0)}%`,
       `fases       formación ${particles.motionPhaseCounts[0]} · tracking ${particles.motionPhaseCounts[1]} · rápido ${particles.motionPhaseCounts[2]} · departure ${particles.motionPhaseCounts[3]}`,
       `target lag  ${particles.averageTargetDistance.toFixed(1)} px promedio · ~${particles.estimatedTargetLagMs.toFixed(0)} ms`,
       `transporte  ${particles.shiftedLastFrame} trasladadas · ${particles.transportedLastFrame} reasignadas · ${particles.releasedLastFrame} liberadas · ${particles.spawnedLastFrame} spawn · ${particles.heldLastFrame} retenidas`,

@@ -100,6 +100,25 @@ body.cursor-hidden * {
   top: 80%;
 }
 
+/* Espacio negativo junto a las siluetas: columna lateral o franja superior, centrada en un ancla. */
+.instruction[data-placement='left'],
+.instruction[data-placement='right'],
+.instruction[data-placement='top'] {
+  left: var(--text-x);
+  right: auto;
+  top: var(--text-y);
+  width: var(--text-width);
+  translate: -50% -50%;
+}
+
+.instruction[data-placement='left'] .instruction__message,
+.instruction[data-placement='right'] .instruction__message,
+.instruction[data-placement='top'] .instruction__message {
+  white-space: normal;
+  text-wrap: balance;
+  line-height: 1.7;
+}
+
 .instruction__message {
   font-size: calc(var(--u) * 1.1 * var(--type-scale));
   font-weight: 450;
@@ -156,6 +175,11 @@ body.cursor-hidden * {
   50% { opacity: 0.5; }
 }
 
+/* Mensaje de presencia: más ligero que una instrucción. */
+.instruction[data-variant='message'] .instruction__message {
+  font-weight: 300;
+}
+
 .instruction[data-variant='title'] {
   --tracking: 0.5em;
 }
@@ -167,6 +191,7 @@ body.cursor-hidden * {
 .instruction[data-variant='title'] .instruction__message {
   font-size: calc(var(--u) * 2.6 * var(--type-scale));
   font-weight: 250;
+  line-height: 1.2;
   clip-path: inset(0 50% 0 50%);
   transition: clip-path 1300ms var(--ease-out);
 }
@@ -219,6 +244,16 @@ body.cursor-hidden * {
 
 .brand[data-placement='lower'] {
   top: 78%;
+}
+
+.brand[data-placement='left'],
+.brand[data-placement='right'],
+.brand[data-placement='top'] {
+  left: var(--text-x);
+  right: auto;
+  top: var(--text-y);
+  width: var(--text-width);
+  transform: translate(-50%, -50%);
 }
 
 .brand__logo {
