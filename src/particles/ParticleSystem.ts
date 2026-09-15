@@ -1,6 +1,7 @@
 import type { Config } from '../config';
-import { TAU, createRandom, lerp, screenScale } from '../utils/MathUtils';
+import { TAU, createRandom, lerp, screenScale, smoothstep } from '../utils/MathUtils';
 import { FlowField } from './FlowField';
+import { motionPhaseIndex, perFrameFactor, retargetFastBlend, speedFastBlend, trackingWeight } from './motionProfile';
 import type { TargetField } from './TargetField';
 
 const DORMANT = 0;
@@ -57,8 +58,12 @@ export class ParticleSystem {
   spawnedLastFrame = 0;
   releasedLastFrame = 0;
   heldLastFrame = 0;
+  /** Partículas que acompañaron una traslación rígida del cuerpo en el último frame de visión. */
+  shiftedLastFrame = 0;
   averageTargetDistance = 0;
   estimatedTargetLagMs = 0;
+  /** Partículas de cuerpo por fase en el último frame: formation, tracking, fast, departure. */
+  readonly motionPhaseCounts = new Int32Array(4);
 
   private readonly px: Float32Array;
   private readonly py: Float32Array;
@@ -84,7 +89,12 @@ export class ParticleSystem {
   private readonly mode: Uint8Array;
   private readonly dormantStack: Int32Array;
   private readonly transportCandidates: Int32Array;
+  /** 0 fuera de la traslación, 1 desplazada, 2 intentará conservar su celda anterior. */
+  private readonly shiftState: Uint8Array;
   private readonly missingByPerson = new Int32Array(8);
+  private readonly personFastBlend = new Float32Array(8);
+  private readonly personInterpolationX = new Float32Array(8);
+  private readonly personInterpolationY = new Float32Array(8);
   private readonly revealTarget: Int32Array;
   private dormantTop = 0;
 
@@ -146,6 +156,7 @@ export class ParticleSystem {
     this.mode = new Uint8Array(n);
     this.dormantStack = new Int32Array(n);
     this.transportCandidates = new Int32Array(n);
+    this.shiftState = new Uint8Array(n);
     this.revealTarget = new Int32Array(n).fill(-1);
     this.binItems = new Int32Array(n);
 
@@ -203,6 +214,7 @@ export class ParticleSystem {
     this.spawnedLastFrame = 0;
     this.releasedLastFrame = 0;
     this.heldLastFrame = 0;
+    this.shiftedLastFrame = this.shiftOwnership(field, now);
 
     if (field.peopleCount > 0 && this.presenceSince < 0) this.presenceSince = now;
     else if (field.peopleCount === 0) this.presenceSince = -1;
@@ -216,7 +228,7 @@ export class ParticleSystem {
     for (let p = 0; p < capacity; p++) {
       if (mode[p] !== BODY) continue;
       const c = cell[p];
-      if (c >= 0 && active[c] === 1 && cellPersonId[c] === particlePersonId[p]) continue;
+      if (c >= 0 && active[c] === 1 && cellPersonId[c] === particlePersonId[p] && cellOwner[c] === p) continue;
       // Una omisión aislada del segmentador no equivale a departure. Conservamos el
       // target anterior durante una ventana corta; clear() elimina el track y no pasa aquí.
       if (c >= 0 && active[c] === 0 && field.personIndex(particlePersonId[p]) < 0 && field.trackAge(particlePersonId[p], now) <= this.settings.occlusionGraceMs) {
@@ -335,9 +347,32 @@ export class ParticleSystem {
 
     const bodyDamping = Math.pow(s.particleDamping, h);
     const trackingDamping = Math.pow(s.trackingDamping, h);
+    const fastDamping = Math.pow(s.fastMotionDamping, h);
     const ambientDamping = Math.pow(s.ambientDamping, h);
-    const maxSpeed = s.maxSpeed * scale;
-    const maxSpeedSq = maxSpeed * maxSpeed;
+    const trackingSnap = perFrameFactor(s.trackingSnap, h);
+    const fastSnap = perFrameFactor(s.fastMotionSnap, h);
+    const trackingMaxSpeed = s.maxSpeed * scale;
+    const formationMaxSpeed = s.formationMaxSpeed * scale;
+    this.motionPhaseCounts.fill(0);
+
+    if (field) {
+      // Entre frames de visión (30 Hz) el target avanza con la traslación estable del track:
+      // evita que las partículas avancen a escalones sin extrapolar más de un intervalo.
+      const sinceVision = Math.min(Math.max(0, now - field.lastVisionAt), s.interpolationMaxMs);
+      const maxInterpolation = s.predictionMaxDistance * scale;
+      for (let k = 0; k < field.peopleCount; k++) {
+        this.personFastBlend[k] = speedFastBlend(field.peopleSpeed[k], s, scale);
+        let ix = field.peopleInterpolationVx[k] * sinceVision;
+        let iy = field.peopleInterpolationVy[k] * sinceVision;
+        const distance = Math.hypot(ix, iy);
+        if (distance > maxInterpolation) {
+          ix *= maxInterpolation / distance;
+          iy *= maxInterpolation / distance;
+        }
+        this.personInterpolationX[k] = ix;
+        this.personInterpolationY[k] = iy;
+      }
+    }
     const noiseAmplitude = s.particleNoise * scale;
     const formationStep = dtMs / s.formationDuration;
     const dispersionStep = dtMs / s.dispersionDuration;
@@ -404,15 +439,24 @@ export class ParticleSystem {
         if (b < 1) b = Math.min(1, b + formationStep);
         const bc = b < 0 ? 0 : b;
         const ease = bc * bc * (3 - 2 * bc);
+        const formed = trackingWeight(bc, s);
         const c = cell[p];
         const personIndex = field ? field.personIndex(particlePersonId[p]) : -1;
         let tx = cellX[c] + jitterX[p] * spacing + noiseAmplitude * Math.sin(time * (0.9 + sd * 0.8) + phase[p]);
         let ty = cellY[c] + jitterY[p] * spacing + noiseAmplitude * Math.cos(time * (0.7 + sd * 0.9) + phase[p] * 1.7);
+        let fast = 0;
+        let letGo = 0;
+        if (field && personIndex < 0) {
+          // Omisión corta de segmentación: la partícula suelta el target y conserva su momentum
+          // en vez de congelarse. Si el track vuelve, recupera el seguimiento en pocos frames.
+          letGo = smoothstep(0, s.departureLetGoMs, field.trackAge(particlePersonId[p], now));
+        }
         if (field && personIndex >= 0) {
-          // La predicción desplaza el target, nunca la posición de la partícula. `ease`
-          // impide que altere la entrada cinematográfica de una persona nueva.
-          tx += field.peoplePredictionX[personIndex] * ease;
-          ty += field.peoplePredictionY[personIndex] * ease;
+          // Predicción e interpolación desplazan el target, nunca la posición de la partícula.
+          // `ease` impide que alteren la entrada cinematográfica de una persona nueva.
+          tx += (field.peoplePredictionX[personIndex] + this.personInterpolationX[personIndex]) * ease;
+          ty += (field.peoplePredictionY[personIndex] + this.personInterpolationY[personIndex]) * ease;
+          fast = this.personFastBlend[personIndex];
           if (celebrationEnvelope > 0) {
             const dx = cellX[c] - field.peopleX[personIndex];
             const dy = cellY[c] - field.peopleY[personIndex];
@@ -436,18 +480,24 @@ export class ParticleSystem {
         flow.sample(x, y);
         // Mientras el enlace es débil la partícula todavía "nada" en el campo y se curva al llegar.
         const swirl = (1 - ease) * s.ambientDrift * 6;
-        const trackingAge = now - retargetedAt[p];
-        const retargetBlend = trackingAge >= 0 && trackingAge < s.trackingResponseMs
-          ? 1 - trackingAge / s.trackingResponseMs
-          : 0;
-        const trackSpeed = field && personIndex >= 0 ? field.peopleSpeed[personIndex] : 0;
-        const motionBlend = Math.min(0.78, Math.max(0, (trackSpeed - 60 * scale) / (1100 * scale)));
-        const trackingBlend = Math.max(retargetBlend, motionBlend);
-        const bodyAttraction = lerp(s.particleAttraction, s.trackingAttraction, trackingBlend);
-        const responsiveDamping = lerp(bodyDamping, trackingDamping, trackingBlend);
+        fast = Math.max(fast, retargetFastBlend(now - retargetedAt[p], s));
+        const trail = (sd * 9.73) % 1 < s.fastMotionTrailRatio ? s.fastMotionTrail * fast : 0;
         const suspension = 1 - celebrationEnvelope * s.revealSuspension;
-        const k = bodyAttraction * ease * suspension;
-        const damping = ambientDamping + (responsiveDamping - ambientDamping) * ease;
+        const textDetach = textEnvelope > 0 && revealIndex >= 0 ? textEnvelope : 0;
+
+        // INITIAL FORMATION y NORMAL/FAST TRACKING se mezclan por `formed`; DEPARTURE por `letGo`.
+        const formationK = s.particleAttraction * ease;
+        const formationDamping = ambientDamping + (bodyDamping - ambientDamping) * ease;
+        const trackK = lerp(s.trackingAttraction, s.fastMotionAttraction, fast);
+        const trackDamping = lerp(trackingDamping, fastDamping, fast);
+        const k = lerp(formationK, trackK, formed) * suspension * (1 - letGo);
+        const damping = lerp(lerp(formationDamping, trackDamping, formed), ambientDamping, letGo);
+        const snap = lerp(trackingSnap, fastSnap, fast) * formed * (1 - trail) * (1 - letGo) * (1 - textDetach) *
+          (1 - Math.min(1, e * s.gestureSnapRelief)) * suspension;
+        const maxSpeed = lerp(formationMaxSpeed, trackingMaxSpeed, formed);
+        const maxSpeedSq = maxSpeed * maxSpeed;
+        this.motionPhaseCounts[motionPhaseIndex(formed, fast, letGo > 0)]++;
+
         for (let i = 0; i < substeps; i++) {
           velX = (velX + ((tx - x) * k + flow.sampleX * swirl) * h) * damping;
           velY = (velY + ((ty - y) * k + flow.sampleY * swirl) * h) * damping;
@@ -459,6 +509,10 @@ export class ParticleSystem {
           }
           x += velX * h;
           y += velY * h;
+          if (snap > 0) {
+            x += (tx - x) * snap;
+            y += (ty - y) * snap;
+          }
         }
         if (!(textEnvelope > 0 && revealIndex >= 0)) {
           targetDistanceTotal += Math.hypot(tx - x, ty - y);
@@ -646,6 +700,54 @@ export class ParticleSystem {
       this.vy[p] += (dy / dist) * kick;
       this.excite[p] = Math.max(this.excite[p], 0.58);
     }
+  }
+
+  /**
+   * Traslación rígida del cuerpo: toda la silueta cambia de celda a la vez y cada partícula sólo
+   * recorre el desplazamiento real. Sin esto, al caminar las partículas del borde trasero cruzan
+   * el cuerpo hasta el delantero y la figura se ve estirada hacia atrás.
+   */
+  private shiftOwnership(field: TargetField, now: number): number {
+    let moving = false;
+    for (let k = 0; k < field.peopleCount; k++) {
+      if (field.peopleCellShiftX[k] !== 0 || field.peopleCellShiftY[k] !== 0) moving = true;
+    }
+    if (!moving) return 0;
+
+    const { mode, cell, cellOwner, particlePersonId, capacity, shiftState } = this;
+    const { cols, rows, active, cellPersonId } = field;
+    for (let p = 0; p < capacity; p++) {
+      shiftState[p] = 0;
+      if (mode[p] !== BODY || cell[p] < 0) continue;
+      const k = field.personIndex(particlePersonId[p]);
+      if (k < 0 || (field.peopleCellShiftX[k] === 0 && field.peopleCellShiftY[k] === 0)) continue;
+      if (cellOwner[cell[p]] === p) cellOwner[cell[p]] = -1;
+      shiftState[p] = 2;
+    }
+
+    // La traslación es inyectiva: dos partículas de la misma persona nunca compiten por una celda.
+    let shifted = 0;
+    for (let p = 0; p < capacity; p++) {
+      if (shiftState[p] === 0) continue;
+      const k = field.personIndex(particlePersonId[p]);
+      const c = cell[p];
+      const col = (c % cols) + field.peopleCellShiftX[k];
+      const row = ((c - (c % cols)) / cols) + field.peopleCellShiftY[k];
+      if (col < 0 || col >= cols || row < 0 || row >= rows) continue;
+      const target = row * cols + col;
+      if (active[target] === 0 || cellPersonId[target] !== particlePersonId[p] || cellOwner[target] >= 0) continue;
+      cell[p] = target;
+      cellOwner[target] = p;
+      this.retargetedAt[p] = now;
+      shiftState[p] = 1;
+      shifted++;
+    }
+
+    // Las que no tienen celda desplazada conservan la suya si nadie la tomó; si no, pasan al transporte.
+    for (let p = 0; p < capacity; p++) {
+      if (shiftState[p] === 2 && cellOwner[cell[p]] < 0) cellOwner[cell[p]] = p;
+    }
+    return shifted;
   }
 
   private rebuildOwnership(field: TargetField, now: number): void {

@@ -1,20 +1,46 @@
 import type { Config } from '../config';
-import { createRandom, expAlpha, lerp, screenScale } from '../utils/MathUtils';
+import { clamp01, createRandom, expAlpha, lerp, screenScale, smoothstep } from '../utils/MathUtils';
 import type { PersonInfo, VisionFrame } from '../vision/types';
 
 const BAYER_4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
-const TRACK_STABLE_FRAMES = 3;
-const PREDICTION_MIN_SPEED = 45;
-const PREDICTION_MAX_SPEED = 2400;
-const REVERSAL_COSINE = -0.25;
+/** Coseno a partir del cual la dirección se considera plenamente sostenida. */
+const FULL_CONFIDENCE_COSINE = 0.95;
+/** Al frenar, la velocidad filtrada responde con esta fracción del suavizado normal. */
+const BRAKE_SMOOTHING_FACTOR = 0.35;
+/** Un borde a menos de esta distancia normalizada del recorte se considera cortado por el cuadro. */
+const EDGE_CLIP_EPSILON = 0.004;
 
 interface TrackMotion {
   x: number;
   y: number;
   vx: number;
   vy: number;
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  /** Velocidad de traslación rígida del cuerpo (px/ms), sin el efecto de brazos. */
+  tvx: number;
+  tvy: number;
+  predictionX: number;
+  predictionY: number;
+  /** Fracción de celda acumulada por traslación rígida que aún no produce un desplazamiento entero. */
+  cellCarryX: number;
+  cellCarryY: number;
   stableFrames: number;
   lastSeen: number;
+}
+
+/**
+ * Traslación común de dos bordes opuestos. Si sólo uno se mueve (un brazo que se extiende)
+ * no hay traslación; si uno está cortado por el cuadro se usa el otro.
+ */
+export function rigidTranslation(deltaA: number, deltaB: number, clippedA: boolean, clippedB: boolean): number {
+  if (clippedA && clippedB) return 0;
+  if (clippedA) return deltaB;
+  if (clippedB) return deltaA;
+  if (deltaA === 0 || deltaB === 0 || Math.sign(deltaA) !== Math.sign(deltaB)) return 0;
+  return Math.abs(deltaA) < Math.abs(deltaB) ? deltaA : deltaB;
 }
 
 /**
@@ -61,6 +87,17 @@ export class TargetField {
   readonly peoplePredictionX: Float32Array;
   readonly peoplePredictionY: Float32Array;
   readonly peoplePredictionActive: Uint8Array;
+  /** Velocidad de traslación confiable (px/ms) para interpolar entre frames de visión; 0 si no es estable. */
+  readonly peopleInterpolationVx: Float32Array;
+  readonly peopleInterpolationVy: Float32Array;
+  /**
+   * Celdas enteras que el cuerpo se trasladó desde el frame anterior. Permite desplazar toda la
+   * silueta a la vez en lugar de mandar partículas del borde trasero al delantero.
+   */
+  readonly peopleCellShiftX: Int32Array;
+  readonly peopleCellShiftY: Int32Array;
+  /** Momento del último frame de visión aplicado (performance.now()). */
+  lastVisionAt = 0;
   /** Copia de la última detección para mapear gestos. */
   readonly lastPeople: PersonInfo[] = [];
 
@@ -83,7 +120,10 @@ export class TargetField {
   private readonly slotCount: Int32Array;
   private readonly slotSumX: Float64Array;
   private readonly slotSumY: Float64Array;
+  private readonly slotBox: Float32Array;
+  private readonly slotClip: Uint8Array;
   private readonly trackCenters = new Map<number, TrackMotion>();
+  private readonly edgePoint = { x: 0, y: 0 };
 
   constructor(private readonly config: Config) {
     const slots = 8;
@@ -105,6 +145,12 @@ export class TargetField {
     this.peoplePredictionX = new Float32Array(slots);
     this.peoplePredictionY = new Float32Array(slots);
     this.peoplePredictionActive = new Uint8Array(slots);
+    this.peopleInterpolationVx = new Float32Array(slots);
+    this.peopleInterpolationVy = new Float32Array(slots);
+    this.peopleCellShiftX = new Int32Array(slots);
+    this.peopleCellShiftY = new Int32Array(slots);
+    this.slotBox = new Float32Array(slots * 4);
+    this.slotClip = new Uint8Array(slots);
   }
 
   resize(width: number, height: number): void {
@@ -158,6 +204,10 @@ export class TargetField {
     this.peoplePredictionX.fill(0);
     this.peoplePredictionY.fill(0);
     this.peoplePredictionActive.fill(0);
+    this.peopleInterpolationVx.fill(0);
+    this.peopleInterpolationVy.fill(0);
+    this.peopleCellShiftX.fill(0);
+    this.peopleCellShiftY.fill(0);
     this.trackCenters.clear();
     this.version++;
   }
@@ -168,6 +218,7 @@ export class TargetField {
     this.ensureMapping(frame.width, frame.height);
     const dt = this.lastUpdate === 0 ? 33 : now - this.lastUpdate;
     this.lastUpdate = now;
+    this.lastVisionAt = now;
 
     const { slotKeep, slotProximity, slotCount, slotSumX, slotSumY } = this;
     slotKeep.fill(0);
@@ -177,12 +228,14 @@ export class TargetField {
     slotSumY.fill(0);
 
     this.lastPeople.length = 0;
+    const { crop } = cfg.camera;
     for (const person of frame.people) {
       this.lastPeople.push({ ...person });
       if (!person.confirmed || person.slot >= slotKeep.length) continue;
       slotProximity[person.slot] = person.proximity;
       slotKeep[person.slot] = lerp(far, close, person.proximity);
       this.slotPersonId[person.slot] = person.id;
+      this.storeScreenBox(person, person.slot, crop);
     }
 
     const { cols, rows, colToMask, rowToMask, cellPerson, cellX, cellY } = this;
@@ -226,72 +279,8 @@ export class TargetField {
       const x = slotSumX[s] / slotCount[s];
       const y = slotSumY[s] / slotCount[s];
       const id = this.slotPersonId[s];
-      const previous = this.trackCenters.get(id);
-      const elapsed = previous ? Math.max(1, now - previous.lastSeen) : 0;
-      const dx = previous ? x - previous.x : 0;
-      const dy = previous ? y - previous.y : 0;
-      const rawVx = previous ? dx / elapsed : 0;
-      const rawVy = previous ? dy / elapsed : 0;
-      const scale = screenScale(this.width, this.height);
-      const rawSpeed = Math.hypot(rawVx, rawVy) * 1000;
-      const previousSpeed = previous ? Math.hypot(previous.vx, previous.vy) * 1000 : 0;
-      const jump = previous === undefined || elapsed > cfg.vision.trackTimeoutMs || rawSpeed > PREDICTION_MAX_SPEED * scale;
-      const directionCosine = previous && rawSpeed > 0 && previousSpeed > 0
-        ? (rawVx * previous.vx + rawVy * previous.vy) / ((rawSpeed / 1000) * (previousSpeed / 1000))
-        : 1;
-      const reversal = !jump && rawSpeed > PREDICTION_MIN_SPEED * scale && previousSpeed > PREDICTION_MIN_SPEED * scale && directionCosine < REVERSAL_COSINE;
-
-      let vx = 0;
-      let vy = 0;
-      let stableFrames = 1;
-      if (previous && !jump) {
-        if (reversal) {
-          // Cambiar de dirección invalida el adelanto anterior durante dos muestras.
-          vx = rawVx;
-          vy = rawVy;
-          stableFrames = 1;
-        } else {
-          const alpha = expAlpha(elapsed, cfg.particles.predictionSmoothingMs);
-          vx = lerp(previous.vx, rawVx, alpha);
-          vy = lerp(previous.vy, rawVy, alpha);
-          stableFrames = Math.min(255, previous.stableFrames + 1);
-        }
-      }
-
-      const speed = Math.hypot(vx, vy) * 1000;
-      const canPredict = cfg.particles.predictionMs > 0 && !jump && !reversal && stableFrames >= TRACK_STABLE_FRAMES && speed >= PREDICTION_MIN_SPEED * scale;
-      let predictionX = canPredict ? vx * cfg.particles.predictionMs : 0;
-      let predictionY = canPredict ? vy * cfg.particles.predictionMs : 0;
-      const predictionDistance = Math.hypot(predictionX, predictionY);
-      const maxPrediction = cfg.particles.predictionMaxDistance * scale;
-      if (predictionDistance > maxPrediction && predictionDistance > 0) {
-        const factor = maxPrediction / predictionDistance;
-        predictionX *= factor;
-        predictionY *= factor;
-      }
-
-      this.peopleX[k] = x;
-      this.peopleY[k] = y;
       this.peopleProximity[k] = slotProximity[s];
-      this.peopleId[k] = id;
-      this.peopleDx[k] = dx;
-      this.peopleDy[k] = dy;
-      this.peopleVx[k] = vx;
-      this.peopleVy[k] = vy;
-      this.peopleSpeed[k] = speed;
-      this.peoplePredictionX[k] = predictionX;
-      this.peoplePredictionY[k] = predictionY;
-      this.peoplePredictionActive[k] = canPredict ? 1 : 0;
-      if (previous) {
-        previous.x = x;
-        previous.y = y;
-        previous.vx = vx;
-        previous.vy = vy;
-        previous.stableFrames = stableFrames;
-        previous.lastSeen = now;
-      } else {
-        this.trackCenters.set(id, { x, y, vx, vy, stableFrames, lastSeen: now });
-      }
+      this.updateTrackMotion(k, s, id, x, y, now);
     }
     for (const [id, center] of this.trackCenters) {
       if (now - center.lastSeen > cfg.vision.trackTimeoutMs * 2) this.trackCenters.delete(id);
@@ -336,6 +325,10 @@ export class TargetField {
     this.peoplePredictionX.fill(0);
     this.peoplePredictionY.fill(0);
     this.peoplePredictionActive.fill(0);
+    this.peopleInterpolationVx.fill(0);
+    this.peopleInterpolationVy.fill(0);
+    this.peopleCellShiftX.fill(0);
+    this.peopleCellShiftY.fill(0);
     this.cellPersonId.fill(-1);
     this.trackCenters.clear();
     this.lastPeople.length = 0;
@@ -360,6 +353,164 @@ export class TargetField {
     out.x = this.mapOffsetX + su * this.mapScaleX;
     out.y = this.mapOffsetY + ((v - crop.y) / crop.height) * this.mapScaleY;
     return out;
+  }
+
+  /** Caja de la persona en px CSS de pantalla y qué bordes están cortados por el recorte. */
+  private storeScreenBox(person: PersonInfo, slot: number, crop: Config['camera']['crop']): void {
+    const a = this.cameraToScreen(person.x0, person.y0, this.edgePoint);
+    const ax = a.x;
+    const ay = a.y;
+    const b = this.cameraToScreen(person.x1, person.y1, this.edgePoint);
+    const o = slot * 4;
+    this.slotBox[o] = Math.min(ax, b.x);
+    this.slotBox[o + 1] = Math.max(ax, b.x);
+    this.slotBox[o + 2] = Math.min(ay, b.y);
+    this.slotBox[o + 3] = Math.max(ay, b.y);
+    const clipX0 = person.x0 <= crop.x + EDGE_CLIP_EPSILON;
+    const clipX1 = person.x1 >= crop.x + crop.width - EDGE_CLIP_EPSILON;
+    const mirror = this.config.camera.mirror;
+    // Bits: 1 izquierda, 2 derecha, 4 arriba, 8 abajo (en pantalla).
+    this.slotClip[slot] =
+      ((mirror ? clipX1 : clipX0) ? 1 : 0) |
+      ((mirror ? clipX0 : clipX1) ? 2 : 0) |
+      (person.y0 <= crop.y + EDGE_CLIP_EPSILON ? 4 : 0) |
+      (person.y1 >= crop.y + crop.height - EDGE_CLIP_EPSILON ? 8 : 0);
+  }
+
+  /**
+   * Velocidad del centro (tamaño aparente, magnetismo, perfil rápido) y velocidad de traslación
+   * rígida (predicción e interpolación). La predicción sólo existe para tracks estables, se atenúa
+   * al girar o frenar, crece suavemente y se corta de inmediato.
+   */
+  private updateTrackMotion(k: number, slot: number, id: number, x: number, y: number, now: number): void {
+    const p = this.config.particles;
+    const scale = screenScale(this.width, this.height);
+    const o = slot * 4;
+    const left = this.slotBox[o];
+    const right = this.slotBox[o + 1];
+    const top = this.slotBox[o + 2];
+    const bottom = this.slotBox[o + 3];
+    const clip = this.slotClip[slot];
+
+    const previous = this.trackCenters.get(id);
+    const elapsed = previous ? Math.max(1, now - previous.lastSeen) : 0;
+    const dx = previous ? x - previous.x : 0;
+    const dy = previous ? y - previous.y : 0;
+    const rawVx = previous ? dx / elapsed : 0;
+    const rawVy = previous ? dy / elapsed : 0;
+    const rawSpeed = Math.hypot(rawVx, rawVy) * 1000;
+    const jump = previous === undefined || elapsed > this.config.vision.trackTimeoutMs || rawSpeed > p.predictionMaxTrackSpeed * scale;
+
+    let vx = 0;
+    let vy = 0;
+    let tvx = 0;
+    let tvy = 0;
+    let translationX = 0;
+    let translationY = 0;
+    let stableFrames = 1;
+    let reversal = false;
+    let directionConfidence = 1;
+    let brakeFactor = 1;
+
+    if (previous && !jump) {
+      const alpha = expAlpha(elapsed, p.predictionSmoothingMs);
+      vx = lerp(previous.vx, rawVx, alpha);
+      vy = lerp(previous.vy, rawVy, alpha);
+
+      translationX = rigidTranslation(left - previous.left, right - previous.right, (clip & 1) !== 0, (clip & 2) !== 0);
+      translationY = rigidTranslation(top - previous.top, bottom - previous.bottom, (clip & 4) !== 0, (clip & 8) !== 0);
+      const rawTvx = translationX / elapsed;
+      const rawTvy = translationY / elapsed;
+      const rawTSpeed = Math.hypot(rawTvx, rawTvy) * 1000;
+      const previousTSpeed = Math.hypot(previous.tvx, previous.tvy) * 1000;
+      const minSpeed = p.predictionMinSpeed * scale;
+      const cosine = rawTSpeed > minSpeed && previousTSpeed > minSpeed
+        ? (rawTvx * previous.tvx + rawTvy * previous.tvy) / ((rawTSpeed / 1000) * (previousTSpeed / 1000))
+        : 1;
+      reversal = cosine < p.predictionReversalCosine;
+      const braking = previousTSpeed > minSpeed && rawTSpeed < previousTSpeed * p.predictionBrakeRatio;
+
+      if (reversal) {
+        // Cambiar de dirección invalida el adelanto: se reinicia la estabilidad.
+        tvx = rawTvx;
+        tvy = rawTvy;
+      } else {
+        const translationAlpha = expAlpha(elapsed, braking ? p.predictionSmoothingMs * BRAKE_SMOOTHING_FACTOR : p.predictionSmoothingMs);
+        tvx = lerp(previous.tvx, rawTvx, translationAlpha);
+        tvy = lerp(previous.tvy, rawTvy, translationAlpha);
+        stableFrames = Math.min(255, previous.stableFrames + 1);
+        directionConfidence = smoothstep(p.predictionTurnCosine, FULL_CONFIDENCE_COSINE, cosine);
+        if (braking) brakeFactor = clamp01(rawTSpeed / (previousTSpeed * p.predictionBrakeRatio));
+      }
+    }
+
+    const translationSpeed = Math.hypot(tvx, tvy) * 1000;
+    const stable = !jump && !reversal && stableFrames >= p.predictionStableFrames && translationSpeed >= p.predictionMinSpeed * scale;
+    const confidence = stable ? directionConfidence * brakeFactor : 0;
+    const canPredict = p.predictionMs > 0 && confidence > 0;
+
+    let targetX = canPredict ? tvx * p.predictionMs * confidence : 0;
+    let targetY = canPredict ? tvy * p.predictionMs * confidence * p.predictionVerticalFactor : 0;
+    const maxPrediction = p.predictionMaxDistance * scale;
+    const targetDistance = Math.hypot(targetX, targetY);
+    if (targetDistance > maxPrediction) {
+      targetX *= maxPrediction / targetDistance;
+      targetY *= maxPrediction / targetDistance;
+    }
+    let predictionX = targetX;
+    let predictionY = targetY;
+    if (previous && canPredict && targetDistance > Math.hypot(previous.predictionX, previous.predictionY)) {
+      const rise = expAlpha(elapsed, p.predictionRiseMs);
+      predictionX = lerp(previous.predictionX, targetX, rise);
+      predictionY = lerp(previous.predictionY, targetY, rise);
+    }
+
+    this.peopleX[k] = x;
+    this.peopleY[k] = y;
+    this.peopleId[k] = id;
+    this.peopleDx[k] = dx;
+    this.peopleDy[k] = dy;
+    this.peopleVx[k] = vx;
+    this.peopleVy[k] = vy;
+    this.peopleSpeed[k] = Math.hypot(vx, vy) * 1000;
+    this.peoplePredictionX[k] = predictionX;
+    this.peoplePredictionY[k] = predictionY;
+    this.peoplePredictionActive[k] = canPredict ? 1 : 0;
+    this.peopleInterpolationVx[k] = tvx * confidence;
+    this.peopleInterpolationVy[k] = tvy * confidence * p.predictionVerticalFactor;
+
+    const motion: TrackMotion = previous ?? {
+      x, y, vx: 0, vy: 0, left, right, top, bottom, tvx: 0, tvy: 0, predictionX: 0, predictionY: 0,
+      cellCarryX: 0, cellCarryY: 0, stableFrames: 1, lastSeen: now,
+    };
+    if (jump) {
+      motion.cellCarryX = 0;
+      motion.cellCarryY = 0;
+    } else {
+      motion.cellCarryX += translationX / this.spacing;
+      motion.cellCarryY += translationY / this.spacing;
+    }
+    const shiftX = Math.trunc(motion.cellCarryX);
+    const shiftY = Math.trunc(motion.cellCarryY);
+    motion.cellCarryX -= shiftX;
+    motion.cellCarryY -= shiftY;
+    this.peopleCellShiftX[k] = shiftX;
+    this.peopleCellShiftY[k] = shiftY;
+    motion.x = x;
+    motion.y = y;
+    motion.vx = vx;
+    motion.vy = vy;
+    motion.left = left;
+    motion.right = right;
+    motion.top = top;
+    motion.bottom = bottom;
+    motion.tvx = tvx;
+    motion.tvy = tvy;
+    motion.predictionX = predictionX;
+    motion.predictionY = predictionY;
+    motion.stableFrames = stableFrames;
+    motion.lastSeen = now;
+    if (!previous) this.trackCenters.set(id, motion);
   }
 
   private ensureMapping(maskWidth: number, maskHeight: number): void {

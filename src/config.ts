@@ -118,25 +118,65 @@ export const defaultConfig = {
     cellJitter: 0.8,
     /** Amplitud del temblor vivo de cada partícula sobre el cuerpo (px). */
     particleNoise: 0.9,
+
+    /* INITIAL FORMATION — entrada lenta y cinematográfica. */
     particleAttraction: 0.16,
     particleDamping: 0.6,
-    /** Resorte temporal para mover una partícula ya formada hacia su nuevo target. */
-    trackingAttraction: 0.45,
-    trackingDamping: 0.38,
-    trackingResponseMs: 100,
-    /** Predicción corta del track. 0 desactiva completamente el adelanto. */
-    predictionMs: 36,
-    predictionMaxDistance: 26,
-    predictionSmoothingMs: 75,
-    /** Tolera una pérdida aislada de segmentación sin dispersar el cuerpo. */
-    occlusionGraceMs: 120,
-    /** Distancia máxima de transporte intra-persona, en px de referencia. */
-    trackingSearchRadius: 360,
-    maxSpeed: 56,
     formationDuration: 780,
     /** Retraso aleatorio de formación (fracción de formationDuration). */
     formationStagger: 0.34,
+    formationMaxSpeed: 26,
     spawnDistance: { min: 32, max: 210 },
+
+    /* NORMAL TRACKING — cuerpo ya formado: debe sentirse como espejo. */
+    /** Fracción de `bond` desde la que una partícula usa el perfil de seguimiento. */
+    trackingBondThreshold: 0.85,
+    trackingAttraction: 0.5,
+    trackingDamping: 0.42,
+    /** Acercamiento directo al target por frame de 60 Hz. Quita lag sin agregar overshoot. */
+    trackingSnap: 0.32,
+    /** Tras un transporte BODY → BODY, la partícula usa el perfil rápido durante esta ventana. */
+    trackingResponseMs: 120,
+    maxSpeed: 64,
+    /** Distancia máxima de transporte intra-persona, en px de referencia. */
+    trackingSearchRadius: 360,
+
+    /* FAST MOTION — caminar rápido o mover brazos. */
+    /** Velocidad del track (px/s de referencia) donde empieza y se completa el perfil rápido. */
+    fastMotionSpeed: { start: 90, full: 700 },
+    fastMotionAttraction: 0.7,
+    fastMotionDamping: 0.34,
+    fastMotionSnap: 0.5,
+    /** Fracción de partículas que se quedan levemente atrás y cuánto se relaja su seguimiento. */
+    fastMotionTrailRatio: 0.12,
+    fastMotionTrail: 0.55,
+
+    /* Predicción e interpolación — sólo tracks estables, limitadas y sin overshoot. */
+    /** Adelanto del track. 0 desactiva completamente la predicción. */
+    predictionMs: 30,
+    predictionMaxDistance: 26,
+    predictionSmoothingMs: 75,
+    predictionStableFrames: 3,
+    predictionMinSpeed: 45,
+    /** Por encima de esta velocidad (px/s) el movimiento se trata como salto, no como traslación. */
+    predictionMaxTrackSpeed: 2400,
+    /** Coseno de giro: por debajo se apaga; entre este valor y 0.95 se atenúa. */
+    predictionTurnCosine: 0.35,
+    predictionReversalCosine: -0.25,
+    /** Si la velocidad cae bajo esta fracción de la anterior, el adelanto se corta en proporción. */
+    predictionBrakeRatio: 0.7,
+    /** Levantar los brazos mueve el centro en vertical: se predice sobre todo en horizontal. */
+    predictionVerticalFactor: 0.35,
+    /** El adelanto crece con esta constante de tiempo y se reduce de inmediato. */
+    predictionRiseMs: 90,
+    /** Avance del target entre frames de visión (30 Hz → 60 Hz). 0 desactiva. */
+    interpolationMaxMs: 40,
+
+    /* DEPARTURE — la presencia se disuelve. */
+    /** Tolera una pérdida aislada de segmentación sin dispersar el cuerpo. */
+    occlusionGraceMs: 120,
+    /** Durante esa gracia la partícula suelta su target en este tiempo y sigue con su momentum. */
+    departureLetGoMs: 70,
     dispersionDuration: 1750,
     releaseKick: 1.8,
     /** Fracción de partículas ambientales que se conservan mientras hay personas. */
@@ -156,6 +196,8 @@ export const defaultConfig = {
     waveWidth: 125,
     waveStrength: 1.45,
     waveOrganicWarp: 0.18,
+    /** Cuánto se relaja el seguimiento directo donde un gesto excita partículas (deja ver la onda). */
+    gestureSnapRelief: 0.85,
     /** Expansión y suspensión parciales del reveal; nunca detienen el tracking. */
     revealExpansion: 16,
     revealSuspension: 0.26,

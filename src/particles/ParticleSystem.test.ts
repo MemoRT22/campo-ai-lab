@@ -87,6 +87,70 @@ function visionFrame(personId: number | null): VisionFrame {
   };
 }
 
+describe('ParticleSystem mirror tracking', () => {
+  it('traslada la silueta completa al caminar, con poco lag y sin overshoot al detenerse', () => {
+    const config = structuredClone(defaultConfig);
+    config.particles.particleCount = 400;
+    config.particles.bodyParticleBudget = 400;
+    config.particles.idleParticleCount = 0;
+    config.particles.particleSpacing = 12;
+    config.particles.particleNoise = 0;
+    config.particles.cellJitter = 0;
+    config.particles.predictionMs = 0;
+    config.particles.interpolationMaxMs = 0;
+    const field = new TargetField(config);
+    const system = new ParticleSystem(config.particles);
+    field.resize(480, 180);
+    system.resize(480, 180);
+
+    activateRectangle(field, 9, 4, 12, 4, 16);
+    system.applyTargets(field, 1000);
+    const state = internals(system);
+    const body: number[] = [];
+    for (let p = 0; p < system.capacity; p++) {
+      if (state.mode[p] !== BODY) continue;
+      body.push(p);
+      state.bond[p] = 1;
+      state.life[p] = 1;
+      state.px[p] = field.cellX[state.cell[p]];
+      state.py[p] = field.cellY[state.cell[p]];
+      state.vx[p] = 0;
+      state.vy[p] = 0;
+    }
+
+    let now = 1000;
+    const frameMs = 1000 / 60;
+    const lag: number[] = [];
+    for (let step = 1; step <= 20; step++) {
+      activateRectangle(field, 9, 4 + step, 12 + step, 4, 16, field.spacing, 0);
+      field.peopleCellShiftX[0] = 1;
+      now += frameMs;
+      system.applyTargets(field, now);
+      expect(system.shiftedLastFrame).toBe(body.length);
+      expect(system.transportedLastFrame).toBe(0);
+      expect(system.releasedLastFrame).toBe(0);
+      for (let i = 0; i < 2; i++) {
+        now += frameMs;
+        system.step(frameMs / 1000, now);
+        if (step > 5) lag.push(system.averageTargetDistance);
+      }
+    }
+    const meanLag = lag.reduce((sum, value) => sum + value, 0) / lag.length;
+    expect(meanLag).toBeLessThan(field.spacing * 0.6);
+
+    field.peopleCellShiftX[0] = 0;
+    let overshoot = 0;
+    for (let i = 0; i < 40; i++) {
+      now += frameMs;
+      if (i % 2 === 0) system.applyTargets(field, now);
+      system.step(frameMs / 1000, now);
+      for (const p of body) overshoot = Math.max(overshoot, state.px[p] - field.cellX[state.cell[p]]);
+    }
+    expect(overshoot).toBeLessThan(1);
+    expect(body.every((p) => state.mode[p] === BODY)).toBe(true);
+  });
+});
+
 describe('ParticleSystem temporal transport', () => {
   it('reutiliza las mismas partículas y conserva su estado al mover una persona', () => {
     const config = structuredClone(defaultConfig);

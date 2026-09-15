@@ -50,6 +50,28 @@ const NUMBER_RULES: Record<string, NumberRule> = {
   'particles.occlusionGraceMs': { min: 0, max: 1000 },
   'particles.trackingSearchRadius': { min: 20, max: 1000 },
   'particles.maxSpeed': { min: 1, max: 200 },
+  'particles.formationMaxSpeed': { min: 1, max: 200 },
+  // Umbrales de smoothstep: nunca iguales a su otro extremo (evita divisiones por cero).
+  'particles.trackingBondThreshold': { min: 0.5, max: 0.98 },
+  'particles.trackingSnap': { min: 0, max: 0.9 },
+  'particles.fastMotionSpeed.start': { min: 0, max: 5000 },
+  'particles.fastMotionSpeed.full': { min: 1, max: 10000 },
+  'particles.fastMotionAttraction': { min: 0, max: 2 },
+  'particles.fastMotionDamping': { min: 0.1, max: 0.99 },
+  'particles.fastMotionSnap': { min: 0, max: 0.9 },
+  'particles.fastMotionTrailRatio': { min: 0, max: 0.5 },
+  'particles.fastMotionTrail': { min: 0, max: 1 },
+  'particles.predictionStableFrames': { min: 1, max: 30, integer: true },
+  'particles.predictionMinSpeed': { min: 0, max: 1000 },
+  'particles.predictionMaxTrackSpeed': { min: 100, max: 20000 },
+  'particles.predictionTurnCosine': { min: -1, max: 0.94 },
+  'particles.predictionReversalCosine': { min: -1, max: 0.5 },
+  'particles.predictionBrakeRatio': { min: 0, max: 1 },
+  'particles.predictionVerticalFactor': { min: 0, max: 1 },
+  'particles.predictionRiseMs': { min: 0, max: 1000 },
+  'particles.interpolationMaxMs': { min: 0, max: 100 },
+  'particles.departureLetGoMs': { min: 1, max: 1000 },
+  'particles.gestureSnapRelief': { min: 0, max: 4 },
   'particles.ambientMotionInfluence': { min: 0, max: 1 },
   'particles.ambientCohesion': { min: 0, max: 0.001 },
   'particles.waveOrganicWarp': { min: 0, max: 0.5 },
@@ -109,6 +131,9 @@ export function validateConfig(input: Config): Config {
   config.vision.poseFPS = Math.min(config.vision.poseFPS, config.vision.processingFPS);
   config.particles.idleParticleCount = Math.min(config.particles.idleParticleCount, config.particles.particleCount);
   config.particles.bodyParticleBudget = Math.min(config.particles.bodyParticleBudget, config.particles.particleCount);
+  if (config.particles.fastMotionSpeed.full <= config.particles.fastMotionSpeed.start) {
+    config.particles.fastMotionSpeed = { ...defaultConfig.particles.fastMotionSpeed };
+  }
   if (config.proximity.closeSize <= config.proximity.farSize) {
     config.proximity.farSize = defaultConfig.proximity.farSize;
     config.proximity.closeSize = defaultConfig.proximity.closeSize;
