@@ -1,6 +1,8 @@
 import type { Config } from '../config';
-import { TAU, createRandom, lerp, screenScale, smoothstep } from '../utils/MathUtils';
+import { TAU, clamp01, createRandom, lerp, screenScale, smoothstep } from '../utils/MathUtils';
 import { FlowField } from './FlowField';
+import { FormationTracker } from './FormationTracker';
+import { MAX_CONNECTIONS, type GroupInteraction } from './GroupInteraction';
 import { motionPhaseIndex, perFrameFactor, retargetFastBlend, speedFastBlend, trackingWeight } from './motionProfile';
 import type { TargetField } from './TargetField';
 
@@ -19,6 +21,17 @@ const TEXT_MIN_BOND = 0.72;
 const IDLE_FADE_IN_MS = 2600;
 const POPULATION_INTERVAL_MS = 200;
 const WRAP_MARGIN = 24;
+/** Personas simultáneas que puede entregar TargetField. */
+const PERSON_SLOTS = 8;
+/** Offset visual (px de referencia) desde el que una partícula cuenta como estela o desprendida. */
+const EFFECT_VISIBLE_PX = 0.75;
+/** Fracción de la corriente en cada extremo donde las partículas aparecen y se desvanecen. */
+const BRIDGE_END_FADE = 0.12;
+/** Fuerza de conexión bajo la cual una partícula regresa al campo. */
+const BRIDGE_RELEASE_STRENGTH = 0.01;
+/** Márgenes de la corriente donde se permite reclutar (evita tomar partículas junto a los cuerpos). */
+const BRIDGE_RECRUIT_MIN_T = 0.05;
+const BRIDGE_RECRUIT_MAX_T = 0.95;
 
 export interface TextFlightTiming {
   /** Momento en que empieza el viaje (puede esperar a la suspensión de la silueta). */
@@ -62,6 +75,15 @@ export class ParticleSystem {
   estimatedTargetLagMs = 0;
   /** Partículas de cuerpo por fase en el último frame: formation, tracking, fast, departure. */
   readonly motionPhaseCounts = new Int32Array(4);
+  /** LIVING BODY: núcleo espejo, microestela y desprendimiento de borde visibles en el último frame. */
+  coreCount = 0;
+  trailCount = 0;
+  shedCount = 0;
+  /** FORMATION WOW: progreso de la persona menos formada que aún no se fija (1 = todas fijas). */
+  formationProgress = 1;
+  /** GROUP MODE: partículas del campo que forman corrientes entre personas. */
+  bridgeParticleCount = 0;
+  readonly formation = new FormationTracker();
 
   private readonly px: Float32Array;
   private readonly py: Float32Array;
@@ -100,7 +122,45 @@ export class ParticleSystem {
   /** Posición de partida cuando un vuelo continúa desde el texto anterior (reveal → marca). */
   private readonly flightFrom: Float32Array;
   private readonly flightUsesFrom: Uint8Array;
+  /** Offset visual (estela/desprendimiento) sobre la posición del núcleo; nunca altera el target. */
+  private readonly offX: Float32Array;
+  private readonly offY: Float32Array;
+  private readonly offVx: Float32Array;
+  private readonly offVy: Float32Array;
+  /** Conexión de grupo a la que pertenece una partícula del campo; -1 si flota libre. */
+  private readonly bridgeSlot: Int8Array;
+  /** Posición (0..1) a lo largo de la corriente. */
+  private readonly bridgeT: Float32Array;
   private dormantTop = 0;
+
+  private readonly personRadius = new Float32Array(PERSON_SLOTS);
+  private readonly personCells = new Int32Array(PERSON_SLOTS);
+  private readonly personPhase = new Float32Array(PERSON_SLOTS);
+  private readonly personAttraction = new Float32Array(PERSON_SLOTS);
+  private readonly personCurl = new Float32Array(PERSON_SLOTS);
+  private readonly personLockSpeed = new Float32Array(PERSON_SLOTS);
+  private readonly personLockPulse = new Float32Array(PERSON_SLOTS);
+  private readonly personBody = new Int32Array(PERSON_SLOTS);
+  private readonly personFormed = new Int32Array(PERSON_SLOTS);
+
+  private group: GroupInteraction | null = null;
+  private readonly bridgeCount = new Int32Array(MAX_CONNECTIONS);
+  private readonly bridgeNeed = new Int32Array(MAX_CONNECTIONS);
+  private readonly bridgeStartX = new Float32Array(MAX_CONNECTIONS);
+  private readonly bridgeStartY = new Float32Array(MAX_CONNECTIONS);
+  private readonly bridgeDirX = new Float32Array(MAX_CONNECTIONS);
+  private readonly bridgeDirY = new Float32Array(MAX_CONNECTIONS);
+  private readonly bridgeSpan = new Float32Array(MAX_CONNECTIONS);
+  private readonly bridgeBend = new Float32Array(MAX_CONNECTIONS);
+  private readonly bridgeFlow = new Float32Array(MAX_CONNECTIONS);
+  private recruitCursor = 0;
+  private recruitSweep = 0;
+  private bridgeSpawnAllowed = false;
+
+  private resonanceX = 0;
+  private resonanceY = 0;
+  private resonanceStart = -Infinity;
+  private resonanceSpawned = true;
 
   private field: TargetField | null = null;
   private fieldVersion = -1;
@@ -120,7 +180,6 @@ export class ParticleSystem {
   private readonly random = createRandom(0xa11ce);
   private lastPopulationAt = -Infinity;
   private populationCursor = 0;
-  private presenceSince = -1;
 
   private readonly waveX = new Float32Array(MAX_WAVES);
   private readonly waveY = new Float32Array(MAX_WAVES);
@@ -176,6 +235,12 @@ export class ParticleSystem {
     this.revealTarget = new Int32Array(n).fill(-1);
     this.flightFrom = new Float32Array(n * 2);
     this.flightUsesFrom = new Uint8Array(n);
+    this.offX = new Float32Array(n);
+    this.offY = new Float32Array(n);
+    this.offVx = new Float32Array(n);
+    this.offVy = new Float32Array(n);
+    this.bridgeSlot = new Int8Array(n).fill(-1);
+    this.bridgeT = new Float32Array(n);
     this.binItems = new Int32Array(n);
 
     const jitter = settings.cellJitter * 0.5;
@@ -190,6 +255,22 @@ export class ParticleSystem {
 
   get dormantCount(): number {
     return this.dormantTop;
+  }
+
+  /** Estado social que dibujan las partículas del campo entre personas. */
+  setGroup(group: GroupInteraction | null): void {
+    this.group = group;
+  }
+
+  /**
+   * Dos ondas de mano de personas distintas se encuentran en (x, y) tras `delayMs`: brillo breve,
+   * dispersión controlada y un pulso pequeño de partículas del campo. Los cuerpos no se tocan.
+   */
+  resonate(x: number, y: number, delayMs: number, now: number): void {
+    this.resonanceX = x;
+    this.resonanceY = y;
+    this.resonanceStart = now + Math.max(0, delayMs);
+    this.resonanceSpawned = false;
   }
 
   /** Puntos tipográficos absolutos (px CSS) hacia los que viaja el grupo de partículas del texto. */
@@ -257,6 +338,7 @@ export class ParticleSystem {
   applyTargets(field: TargetField, now: number): void {
     this.field = field;
     if (field.version !== this.fieldVersion) this.rebuildOwnership(field, now);
+    this.formation.sync(field.peopleId, field.peopleCount, now);
 
     this.transportedLastFrame = 0;
     this.formedLastFrame = 0;
@@ -264,9 +346,6 @@ export class ParticleSystem {
     this.releasedLastFrame = 0;
     this.heldLastFrame = 0;
     this.shiftedLastFrame = this.shiftOwnership(field, now);
-
-    if (field.peopleCount > 0 && this.presenceSince < 0) this.presenceSince = now;
-    else if (field.peopleCount === 0) this.presenceSince = -1;
 
     const { mode, cell, life, cellOwner, capacity, particlePersonId, transportCandidates } = this;
     const { active, cellPersonId } = field;
@@ -288,15 +367,21 @@ export class ParticleSystem {
       transportCandidates[candidateCount++] = p;
     }
 
-    const missingByPerson = this.missingByPerson;
+    const { missingByPerson, personRadius, personCells } = this;
     missingByPerson.fill(0);
+    personRadius.fill(0);
+    personCells.fill(0);
     const { activeList, activeCount, cellX, cellY } = field;
     for (let k = 0; k < activeCount; k++) {
       const c = activeList[k];
-      if (cellOwner[c] >= 0) continue;
       const personIndex = field.personIndex(cellPersonId[c]);
-      if (personIndex >= 0) missingByPerson[personIndex]++;
+      if (personIndex < 0) continue;
+      personRadius[personIndex] += Math.hypot(cellX[c] - field.peopleX[personIndex], cellY[c] - field.peopleY[personIndex]);
+      personCells[personIndex]++;
+      if (cellOwner[c] < 0) missingByPerson[personIndex]++;
     }
+    // Dos veces la distancia media al centro ≈ extensión del cuerpo: base del stagger radial.
+    for (let k = 0; k < field.peopleCount; k++) personRadius[k] = personCells[k] > 0 ? (2 * personRadius[k]) / personCells[k] : 1;
 
     // Transporte intra-persona. Sólo cambia el target: posición, velocidad, bond, life,
     // glow y momentum permanecen exactamente como estaban.
@@ -337,7 +422,6 @@ export class ParticleSystem {
     }
     for (let b = 0; b < binCount.length; b++) binCursor[b] = binStart[b];
 
-    const stagger = this.settings.formationStagger;
     for (let k = 0; k < activeCount; k++) {
       const c = activeList[k];
       if (cellOwner[c] >= 0) continue;
@@ -345,10 +429,12 @@ export class ParticleSystem {
       let p = this.takeFree(cellX[c], cellY[c]);
       let spawned = false;
       if (p >= 0) {
-        if (this.bond[p] < 0.05) this.bond[p] = -this.random() * stagger;
+        this.bridgeSlot[p] = -1;
+        if (this.bond[p] < 0.05) this.bond[p] = -this.formationDelay(field, c);
       } else if (this.dormantTop > 0) {
         p = this.dormantStack[--this.dormantTop];
         this.spawnNear(p, cellX[c], cellY[c]);
+        this.bond[p] = -this.formationDelay(field, c);
         spawned = true;
       } else {
         continue;
@@ -379,6 +465,9 @@ export class ParticleSystem {
 
   step(dtSeconds: number, now: number): void {
     const s = this.settings;
+    const fw = s.formationWow;
+    const lb = s.livingBody;
+    const gi = s.groupInteraction;
     const dtMs = dtSeconds * 1000;
     const frames = dtMs / FRAME_MS;
     const substeps = frames > 1.5 ? Math.ceil(frames / 1.25) : 1;
@@ -388,6 +477,7 @@ export class ParticleSystem {
     const flow = this.flow;
     const field = this.field;
     const { px, py, vx, vy, bond, life, lifeTarget, fadeMs, mode, cell, excite, glow, proximity, seed, phase, jitterX, jitterY, releasedAt, retargetedAt, particlePersonId } = this;
+    const { offX, offY, offVx, offVy, bridgeSlot, bridgeT, bridgeCount } = this;
     const renderData = this.renderData;
 
     const scale = this.scale;
@@ -397,17 +487,24 @@ export class ParticleSystem {
     const cellProximity = field?.cellProximity;
     const cellEdge = field?.cellEdge;
     const peopleCount = field ? field.peopleCount : 0;
+    const pendingCount = field ? field.pendingCount : 0;
 
     const bodyDamping = Math.pow(s.particleDamping, h);
     const trackingDamping = Math.pow(s.trackingDamping, h);
     const fastDamping = Math.pow(s.fastMotionDamping, h);
     const ambientDamping = Math.pow(s.ambientDamping, h);
+    const bridgeDamping = Math.pow(gi.damping, h);
     const trackingSnap = perFrameFactor(s.trackingSnap, h);
     const fastSnap = perFrameFactor(s.fastMotionSnap, h);
     const trackingMaxSpeed = s.maxSpeed * scale;
     const formationMaxSpeed = s.formationMaxSpeed * scale;
+    const bridgeMaxSpeed = gi.maxSpeed * scale;
     this.motionPhaseCounts.fill(0);
 
+    const formation = this.formation;
+    const { personPhase, personAttraction, personLockSpeed, personLockPulse, personBody, personFormed } = this;
+    personBody.fill(0);
+    personFormed.fill(0);
     if (field) {
       // Entre frames de visión (30 Hz) el target avanza con la traslación estable del track:
       // evita que las partículas avancen a escalones sin extrapolar más de un intervalo.
@@ -424,10 +521,27 @@ export class ParticleSystem {
         }
         this.personInterpolationX[k] = ix;
         this.personInterpolationY[k] = iy;
+
+        // FORMATION WOW por persona: ventana de formación → presencia magnética; lock → perfil espejo.
+        const age = formation.ageOf(k, now);
+        const formationPhase = age < s.formationAttractionWindowMs
+          ? 1
+          : Math.max(0, 1 - (age - s.formationAttractionWindowMs) / s.formationAttractionFadeMs);
+        personPhase[k] = formationPhase;
+        personAttraction[k] = s.ambientAttraction * Math.max(s.magneticResidualAttraction, formationPhase) * lerp(1, fw.anticipationBoost, formationPhase);
+        personLockSpeed[k] = formation.isLocked(k) ? fw.lockSpeedup : 1;
+        const lockAge = now - formation.lockedAtOf(k);
+        // El giro sólo existe mientras el campo converge: tras el lock se apaga y no deja órbitas.
+        this.personCurl[k] = fw.anticipationCurl * formationPhase * (formation.lockedAtOf(k) >= 0 ? 1 - smoothstep(0, fw.curlReleaseMs, lockAge) : 1);
+        const pulseRise = fw.lockGlowMs * 0.25;
+        personLockPulse[k] = formation.lockedAtOf(k) >= 0 && lockAge < fw.lockGlowMs
+          ? fw.lockGlow * smoothstep(0, pulseRise, lockAge) * (1 - smoothstep(pulseRise, fw.lockGlowMs, lockAge))
+          : 0;
       }
     }
     const noiseAmplitude = s.particleNoise * scale;
     const formationStep = dtMs / s.formationDuration;
+    const staggerSpan = s.formationStagger;
     const dispersionStep = dtMs / s.dispersionDuration;
     const formationFadeMs = s.formationDuration * 0.6;
     const fadeDelayMs = s.dispersionDuration * 0.2;
@@ -444,6 +558,42 @@ export class ParticleSystem {
         const k = field && this.wavePersonId[w] >= 0 ? field.personIndex(this.wavePersonId[w]) : -1;
         this.waveOriginX[w] = k >= 0 && field ? field.peopleX[k] + this.waveOffsetX[w] : this.waveX[w];
         this.waveOriginY[w] = k >= 0 && field ? field.peopleY[k] + this.waveOffsetY[w] : this.waveY[w];
+      }
+    }
+
+    // LIVING BODY: el offset visual regresa al núcleo en ~3 constantes de tiempo.
+    const trailDecay = Math.exp(-dtMs / Math.max(1, lb.trailDurationMs / 3));
+    const shedDecay = Math.exp(-dtMs / Math.max(1, lb.shedDurationMs / 3));
+    const shedVelocityDecay = Math.exp(-dtMs / Math.max(1, lb.shedDurationMs / 4));
+    const trailMax = lb.trailMaxDistance * scale;
+    const shedMax = lb.shedMaxDistance * scale;
+    const effectSpeedStart = lb.trailSpeed.start * scale;
+    const effectSpeedFull = lb.trailSpeed.full * scale;
+    const effectVisible = EFFECT_VISIBLE_PX * scale;
+    let trailCount = 0;
+    let shedCount = 0;
+
+    // GROUP MODE: geometría de cada corriente una vez por frame.
+    const group = gi.enabled ? this.group : null;
+    const groupEnergy = group ? group.energy : 0;
+    if (group) this.prepareBridges(group, time);
+    bridgeCount.fill(0);
+    const bridgeWidth = gi.width * scale;
+    const nodeRadius = gi.nodeRadius * scale;
+    const ambientDriftBoost = 1 + gi.collectiveAmbientDrift * groupEnergy;
+    const twinkleAmount = Math.min(1, s.idleTwinkle * (1 + gi.collectiveTwinkle * groupEnergy));
+
+    // Ondas de dos personas que se encuentran.
+    const resonanceAge = now - this.resonanceStart;
+    const resonanceActive = resonanceAge >= 0 && resonanceAge < gi.resonanceDurationMs;
+    const resonanceRadius = gi.resonanceRadius * scale;
+    let resonanceEnvelope = 0;
+    if (resonanceActive) {
+      const rise = gi.resonanceDurationMs * 0.2;
+      resonanceEnvelope = smoothstep(0, rise, resonanceAge) * (1 - smoothstep(rise, gi.resonanceDurationMs, resonanceAge));
+      if (!this.resonanceSpawned) {
+        this.resonanceSpawned = true;
+        this.spawnResonancePulse(now);
       }
     }
 
@@ -476,16 +626,7 @@ export class ParticleSystem {
     const attractionRadiusSq = (s.formationAttractionRadius * scale) ** 2;
     const innerRadius = s.formationAttractionInnerRadius * scale;
     const magneticRadiusSq = (s.magneticRadius * scale) ** 2;
-    let attraction = 0;
-    let formationPhase = 0;
-    if (peopleCount > 0 && this.presenceSince >= 0) {
-      // Ventana de formación (atracción plena) → presencia magnética (atracción residual).
-      const elapsed = now - this.presenceSince;
-      formationPhase = elapsed < s.formationAttractionWindowMs
-        ? 1
-        : Math.max(0, 1 - (elapsed - s.formationAttractionWindowMs) / s.formationAttractionFadeMs);
-      attraction = s.ambientAttraction * Math.max(s.magneticResidualAttraction, formationPhase);
-    }
+    const pendingAttraction = s.ambientAttraction * fw.pendingAttraction;
     const { idleDepth } = s;
     const cohesionRadiusSq = (s.ambientCohesionRadius * scale) ** 2;
     let detaching = 0;
@@ -522,17 +663,24 @@ export class ParticleSystem {
       const sd = seed[p];
       let anticipation = 0;
       let textDetach = 0;
+      let renderX = 0;
+      let renderY = 0;
+      /** Multiplicador visual de brillo: formación, lock, estela y corrientes. */
+      let visualAlpha = 1;
+      let visualSize = 1;
 
       if (m === BODY && cellX && cellY && cellProximity && cellEdge) {
         bodyCount++;
-        if (b < 1) b = Math.min(1, b + formationStep);
+        const c = cell[p];
+        const personIndex = field ? field.personIndex(particlePersonId[p]) : -1;
+        if (b < 1) b = Math.min(1, b + formationStep * (personIndex >= 0 ? personLockSpeed[personIndex] : 1));
         const bc = b < 0 ? 0 : b;
         const ease = bc * bc * (3 - 2 * bc);
         const formed = trackingWeight(bc, s);
-        const c = cell[p];
-        const personIndex = field ? field.personIndex(particlePersonId[p]) : -1;
-        let tx = cellX[c] + jitterX[p] * spacing + noiseAmplitude * Math.sin(time * (0.9 + sd * 0.8) + phase[p]);
-        let ty = cellY[c] + jitterY[p] * spacing + noiseAmplitude * Math.cos(time * (0.7 + sd * 0.9) + phase[p] * 1.7);
+        // 0 al ser asignada, 1 cuando le toca colapsar: mientras espera ya se curva hacia el cuerpo.
+        const waiting = b >= 0 || staggerSpan <= 0 ? 1 : clamp01(1 + b / staggerSpan);
+        let tx = cellX[c] + jitterX[p] * spacing;
+        let ty = cellY[c] + jitterY[p] * spacing;
         let fast = 0;
         let letGo = 0;
         if (field && personIndex < 0) {
@@ -541,6 +689,9 @@ export class ParticleSystem {
           letGo = smoothstep(0, s.departureLetGoMs, field.trackAge(particlePersonId[p], now));
         }
         if (field && personIndex >= 0) {
+          personBody[personIndex]++;
+          if (formed >= 0.5) personFormed[personIndex]++;
+          visualAlpha += personLockPulse[personIndex];
           // Predicción e interpolación desplazan el target, nunca la posición de la partícula.
           // `ease` impide que alteren la entrada cinematográfica de una persona nueva.
           tx += (field.peoplePredictionX[personIndex] + this.personInterpolationX[personIndex]) * ease;
@@ -578,26 +729,30 @@ export class ParticleSystem {
         // Mientras el enlace es débil la partícula todavía "nada" en el campo y se curva al llegar.
         const swirl = (1 - ease) * s.ambientDrift * 6;
         fast = Math.max(fast, retargetFastBlend(now - retargetedAt[p], s));
-        const trail = (sd * 9.73) % 1 < s.fastMotionTrailRatio ? s.fastMotionTrail * fast : 0;
         const suspension = 1 - celebrationEnvelope * s.revealSuspension;
 
         // INITIAL FORMATION y NORMAL/FAST TRACKING se mezclan por `formed`; DEPARTURE por `letGo`.
-        const formationK = s.particleAttraction * ease;
+        const formationK = s.particleAttraction * ease + fw.waitingAttraction * (1 - ease) * waiting;
         const formationDamping = ambientDamping + (bodyDamping - ambientDamping) * ease;
         const trackK = lerp(s.trackingAttraction, s.fastMotionAttraction, fast);
         const trackDamping = lerp(trackingDamping, fastDamping, fast);
         // Las partículas que viajan al texto planean con un resorte suave; al volver recuperan el tracking.
         const k = lerp(lerp(formationK, trackK, formed) * suspension * (1 - letGo), s.textTravelAttraction, textDetach);
         const damping = lerp(lerp(lerp(formationDamping, trackDamping, formed), ambientDamping, letGo), bodyDamping, textDetach);
-        const snap = lerp(trackingSnap, fastSnap, fast) * formed * (1 - trail) * (1 - letGo) * (1 - textDetach) *
+        const snap = lerp(trackingSnap, fastSnap, fast) * formed * (1 - letGo) * (1 - textDetach) *
           (1 - Math.min(1, e * s.gestureSnapRelief)) * suspension;
+        // COLLAPSE: giro perpendicular al target que desaparece al fijarse (llegan en arco).
+        const curl = formationK * fw.collapseCurl * (1 - ease) * (1 - formed) * (1 - letGo) * (1 - textDetach) *
+          (sd < fw.anticipationSwirlBias ? 1 : -1);
         const maxSpeed = lerp(formationMaxSpeed, trackingMaxSpeed, formed);
         const maxSpeedSq = maxSpeed * maxSpeed;
         this.motionPhaseCounts[motionPhaseIndex(formed, fast, letGo > 0)]++;
 
         for (let i = 0; i < substeps; i++) {
-          velX = (velX + ((tx - x) * k + flow.sampleX * swirl) * h) * damping;
-          velY = (velY + ((ty - y) * k + flow.sampleY * swirl) * h) * damping;
+          const ex = tx - x;
+          const ey = ty - y;
+          velX = (velX + (ex * k - ey * curl + flow.sampleX * swirl) * h) * damping;
+          velY = (velY + (ey * k + ex * curl + flow.sampleY * swirl) * h) * damping;
           const speedSq = velX * velX + velY * velY;
           if (speedSq > maxSpeedSq) {
             const f = maxSpeed / Math.sqrt(speedSq);
@@ -615,13 +770,77 @@ export class ParticleSystem {
           targetDistanceTotal += Math.hypot(tx - x, ty - y);
           targetDistanceSamples++;
         }
+        anticipation = (1 - ease) * waiting;
+        visualAlpha += fw.collapseGlow * 4 * ease * (1 - ease) * (1 - formed);
+
+        // LIVING BODY — offset visual encima del núcleo: microestela y desprendimiento de borde.
+        const edge = cellEdge[c] === 1;
+        const trailClass = (sd * 9.73) % 1 < (edge ? lb.trailRatioEdge : lb.trailRatioInterior);
+        const shedClass = edge && (sd * 5.31) % 1 < lb.shedRatio;
+        let ox = offX[p];
+        let oy = offY[p];
+        if (trailClass || shedClass || ox !== 0 || oy !== 0) {
+          let ovx = offVx[p];
+          let ovy = offVy[p];
+          const moveX = x - px[p];
+          const moveY = y - py[p];
+          const move = Math.sqrt(moveX * moveX + moveY * moveY);
+          const localSpeed = dtMs > 0 ? (move / dtMs) * 1000 : 0;
+          const gain = trailClass || shedClass
+            ? smoothstep(effectSpeedStart, effectSpeedFull, localSpeed) * formed * (1 - letGo) * (1 - textDetach) * (1 - celebrationEnvelope)
+            : 0;
+          if (gain > 0) {
+            // Inercia: la partícula conserva parte de su posición en el mundo y queda atrás un instante.
+            ox -= moveX * lb.trailInertia * gain;
+            oy -= moveY * lb.trailInertia * gain;
+            if (shedClass && move > 0) {
+              const side = (sd < 0.5 ? -1 : 1) * (0.55 + 0.45 * Math.sin(time * 2.3 + phase[p]));
+              const push = lb.shedForce * scale * gain * frames * side;
+              ovx -= (moveY / move) * push;
+              ovy += (moveX / move) * push;
+            }
+          }
+          ovx *= shedVelocityDecay;
+          ovy *= shedVelocityDecay;
+          ox = (ox + ovx * frames) * (shedClass ? shedDecay : trailDecay);
+          oy = (oy + ovy * frames) * (shedClass ? shedDecay : trailDecay);
+          let offset = Math.sqrt(ox * ox + oy * oy);
+          const maxOffset = shedClass ? shedMax : trailMax;
+          if (offset > maxOffset) {
+            const f = maxOffset / offset;
+            ox *= f;
+            oy *= f;
+            ovx *= f;
+            ovy *= f;
+            offset = maxOffset;
+          }
+          if (offset < 0.01 && Math.abs(ovx) + Math.abs(ovy) < 0.001) {
+            ox = 0;
+            oy = 0;
+            ovx = 0;
+            ovy = 0;
+          } else if (offset > effectVisible) {
+            if (shedClass) shedCount++;
+            else trailCount++;
+            visualAlpha *= lerp(1, lb.effectAlpha, Math.min(1, offset / trailMax));
+          }
+          offVx[p] = ovx;
+          offVy[p] = ovy;
+          offX[p] = ox;
+          offY[p] = oy;
+        }
+        // Quieto: el interior apenas tiembla y el borde flota lento. Sólo visual.
+        const noise = noiseAmplitude * (edge ? lb.edgeFloat : lb.interiorNoise);
+        const noiseRate = edge ? lb.edgeFloatSpeed : 1;
+        renderX = x + ox + noise * Math.sin(time * (0.9 + sd * 0.8) * noiseRate + phase[p]);
+        renderY = y + oy + noise * Math.cos(time * (0.7 + sd * 0.9) * noiseRate + phase[p] * 1.7);
 
         const prox = cellProximity[c];
-        const glowTarget = lerp(opacityFar, opacityClose, prox) * (cellEdge[c] === 1 ? s.edgeBrightness : 1);
+        const glowTarget = lerp(opacityFar, opacityClose, prox) * (edge ? s.edgeBrightness : 1);
         glow[p] += (glowTarget - glow[p]) * glowAlpha;
         proximity[p] += (prox - proximity[p]) * glowAlpha;
       } else {
-        if (lt === 1) ambientVisible++;
+        if (lt === 1 && bridgeSlot[p] < 0) ambientVisible++;
         const detachTime = this.detachAt[p];
         if (detachTime > 0 && now >= detachTime) this.detach(p, now);
         const cohesive = this.detachAt[p] > 0;
@@ -629,6 +848,7 @@ export class ParticleSystem {
         let ax = 0;
         let ay = 0;
         let damping = ambientDamping;
+        let speedLimit = 0;
         if (cohesive) {
           // DEPARTURE: todavía con la forma del cuerpo; sólo conserva su momentum.
           detaching++;
@@ -640,64 +860,159 @@ export class ParticleSystem {
           const sinceRelease = now - releasedAt[p];
           const dispersing = releasedAt[p] > 0 && sinceRelease < s.dispersionDuration ? 1 - sinceRelease / s.dispersionDuration : 0;
           flow.sample(x, y);
-          const drift = s.ambientDrift * scale * lerp(idleDepth.driftFar, idleDepth.driftNear, sd) * (1 + dispersing * 5);
-          ax = flow.sampleX * drift + (this.random() - 0.5) * s.ambientBrownian * scale;
-          ay = flow.sampleY * drift + (this.random() - 0.5) * s.ambientBrownian * scale;
 
-          if (peopleCount === 0 && dispersing < 0.1) {
-            // Tres pozos muy lentos comparten el mismo campo de flujo. Dan respiración y
-            // profundidad al idle sin vecinos por partícula ni coste cuadrático.
-            const layer = Math.min(2, (sd * 3) | 0);
-            const anchorX = this.width * (0.22 + layer * 0.28 + Math.sin(time * s.idleWellSpeed + layer * 2.1) * s.idleWellWander);
-            const anchorY = this.height * (0.38 + (layer & 1) * 0.23 + Math.cos(time * s.idleWellSpeed * 0.83 + layer * 1.7) * s.idleWellWander * 1.25);
-            const dx = anchorX - x;
-            const dy = anchorY - y;
-            const force = s.ambientCohesion / (1 + (dx * dx + dy * dy) / cohesionRadiusSq);
-            ax += dx * force;
-            ay += dy * force;
+          let slot = bridgeSlot[p];
+          if (slot >= 0 && (!group || group.strength[slot] < BRIDGE_RELEASE_STRENGTH || this.bridgeSpan[slot] <= 0 || lt === 0)) {
+            // La conexión se apagó: la partícula vuelve al campo sin salto de brillo.
+            bridgeSlot[p] = -1;
+            fadeMs[p] = IDLE_FADE_IN_MS;
+            slot = -1;
           }
 
-          if (attraction > 0 && dispersing < 0.3 && field) {
-            for (let k = 0; k < peopleCount; k++) {
-              const dx = field.peopleX[k] - x;
-              const dy = field.peopleY[k] - y;
-              const distSq = dx * dx + dy * dy;
-              const dist = Math.sqrt(distSq) + 0.001;
-              const inner = dist < innerRadius ? dist / innerRadius : 1;
-              const pull = 1 / (1 + distSq / attractionRadiusSq);
-              const force = attraction * scale * inner * pull;
-              ax += (dx / dist) * force;
-              ay += (dy / dist) * force;
-              anticipation = Math.max(anticipation, formationPhase * pull);
+          if (slot >= 0 && group) {
+            // GROUP MODE: la partícula fluye por una corriente curva entre dos personas.
+            const strength = group.strength[slot];
+            const lane = ((sd * 7.13) % 1) * 2 - 1;
+            const isNode = (sd * 3.37) % 1 < gi.nodeRatio * groupEnergy;
+            let t = bridgeT[p] + (lane >= 0 ? 1 : -1) * this.bridgeFlow[slot] * dtMs * 0.001;
+            if (t > 1 || t < 0) {
+              t = t > 1 ? t - 1 : t + 1;
+              if (bridgeCount[slot] >= group.particleBudget[slot]) {
+                // Sobra presupuesto: sale de la corriente donde es invisible.
+                bridgeSlot[p] = -1;
+                fadeMs[p] = IDLE_FADE_IN_MS;
+                slot = -1;
+              }
+              if (!isNode) {
+                l = 0;
+                life[p] = 0;
+              }
+            }
+            bridgeT[p] = t;
+            if (slot >= 0) {
+              bridgeCount[slot]++;
+              const span = this.bridgeSpan[slot];
+              const dirX = this.bridgeDirX[slot];
+              const dirY = this.bridgeDirY[slot];
+              let targetX: number;
+              let targetY: number;
+              let endFade = 1;
+              if (isNode) {
+                const bend = this.bridgeBend[slot];
+                const angle = phase[p] + time * gi.nodeSpin * (lane >= 0 ? 1 : -1);
+                const radius = nodeRadius * (0.35 + 0.65 * Math.abs(lane));
+                targetX = this.bridgeStartX[slot] + dirX * span * 0.5 - dirY * bend + Math.cos(angle) * radius;
+                targetY = this.bridgeStartY[slot] + dirY * span * 0.5 + dirX * bend + Math.sin(angle) * radius;
+              } else {
+                const profile = Math.sin(Math.PI * t);
+                const normal = this.bridgeBend[slot] * profile + lane * bridgeWidth * (0.35 + 0.65 * profile);
+                targetX = this.bridgeStartX[slot] + dirX * span * t - dirY * normal;
+                targetY = this.bridgeStartY[slot] + dirY * span * t + dirX * normal;
+                endFade = smoothstep(0, BRIDGE_END_FADE, t) * smoothstep(0, BRIDGE_END_FADE, 1 - t);
+                if (l === 0) {
+                  // Reaparece en su extremo: invisible, sin cruzar la pantalla.
+                  x = targetX;
+                  y = targetY;
+                  velX = 0;
+                  velY = 0;
+                }
+              }
+              const drift = s.ambientDrift * scale * 2;
+              ax = (targetX - x) * gi.attraction * strength + flow.sampleX * drift;
+              ay = (targetY - y) * gi.attraction * strength + flow.sampleY * drift;
+              damping = bridgeDamping;
+              speedLimit = bridgeMaxSpeed;
+              visualAlpha = lerp(1, gi.alpha * endFade, strength);
+              visualSize = lerp(1, gi.size, strength);
+            }
+          }
 
-              const wake = Math.max(0, 1 - distSq / magneticRadiusSq);
-              if (wake <= 0) continue;
-              const pvx = field.peopleVx[k];
-              const pvy = field.peopleVy[k];
-              ax += pvx * FRAME_MS * s.ambientMotionInfluence * wake;
-              ay += pvy * FRAME_MS * s.ambientMotionInfluence * wake;
-              // Las partículas que quedan delante del movimiento se abren hacia los lados.
-              const bodySpeed = Math.hypot(pvx, pvy);
-              if (bodySpeed > 0.001) {
-                const nx = pvx / bodySpeed;
-                const ny = pvy / bodySpeed;
-                const ahead = -dx * nx - dy * ny;
-                if (ahead > 0) {
-                  const sideX = -dx - ahead * nx;
-                  const sideY = -dy - ahead * ny;
-                  const side = Math.hypot(sideX, sideY) + 0.001;
-                  const push = s.magneticDeflection * bodySpeed * FRAME_MS * wake;
-                  ax += (sideX / side) * push;
-                  ay += (sideY / side) * push;
+          if (slot < 0) {
+            const drift = s.ambientDrift * scale * lerp(idleDepth.driftFar, idleDepth.driftNear, sd) * (1 + dispersing * 5) * ambientDriftBoost;
+            ax = flow.sampleX * drift + (this.random() - 0.5) * s.ambientBrownian * scale;
+            ay = flow.sampleY * drift + (this.random() - 0.5) * s.ambientBrownian * scale;
+
+            if (peopleCount === 0 && dispersing < 0.1) {
+              // Tres pozos muy lentos comparten el mismo campo de flujo. Dan respiración y
+              // profundidad al idle sin vecinos por partícula ni coste cuadrático.
+              const layer = Math.min(2, (sd * 3) | 0);
+              const anchorX = this.width * (0.22 + layer * 0.28 + Math.sin(time * s.idleWellSpeed + layer * 2.1) * s.idleWellWander);
+              const anchorY = this.height * (0.38 + (layer & 1) * 0.23 + Math.cos(time * s.idleWellSpeed * 0.83 + layer * 1.7) * s.idleWellWander * 1.25);
+              const dx = anchorX - x;
+              const dy = anchorY - y;
+              const force = s.ambientCohesion / (1 + (dx * dx + dy * dy) / cohesionRadiusSq);
+              ax += dx * force;
+              ay += dy * force;
+            }
+
+            if ((peopleCount > 0 || pendingCount > 0) && dispersing < 0.3 && field) {
+              const swirlSign = sd < fw.anticipationSwirlBias ? 1 : -1;
+              // ANTICIPATION: una silueta aún no confirmada ya curva y enciende el campo cercano.
+              for (let q = 0; q < pendingCount; q++) {
+                const dx = field.pendingX[q] - x;
+                const dy = field.pendingY[q] - y;
+                const distSq = dx * dx + dy * dy;
+                const dist = Math.sqrt(distSq) + 0.001;
+                const inner = dist < innerRadius ? dist / innerRadius : 1;
+                const pull = 1 / (1 + distSq / attractionRadiusSq);
+                const force = pendingAttraction * scale * inner * pull;
+                const tangential = force * fw.anticipationCurl * swirlSign;
+                ax += (dx * force - dy * tangential) / dist;
+                ay += (dy * force + dx * tangential) / dist;
+                anticipation = Math.max(anticipation, pull);
+              }
+              for (let k = 0; k < peopleCount; k++) {
+                const dx = field.peopleX[k] - x;
+                const dy = field.peopleY[k] - y;
+                const distSq = dx * dx + dy * dy;
+                const dist = Math.sqrt(distSq) + 0.001;
+                const inner = dist < innerRadius ? dist / innerRadius : 1;
+                const pull = 1 / (1 + distSq / attractionRadiusSq);
+                const force = personAttraction[k] * scale * inner * pull;
+                // Campo magnético que se activa: atracción con giro tangencial durante la formación.
+                const tangential = force * this.personCurl[k] * swirlSign;
+                ax += (dx * force - dy * tangential) / dist;
+                ay += (dy * force + dx * tangential) / dist;
+                anticipation = Math.max(anticipation, personPhase[k] * pull);
+
+                const wake = Math.max(0, 1 - distSq / magneticRadiusSq);
+                if (wake <= 0) continue;
+                const pvx = field.peopleVx[k];
+                const pvy = field.peopleVy[k];
+                ax += pvx * FRAME_MS * s.ambientMotionInfluence * wake;
+                ay += pvy * FRAME_MS * s.ambientMotionInfluence * wake;
+                // Las partículas que quedan delante del movimiento se abren hacia los lados.
+                const bodySpeed = Math.hypot(pvx, pvy);
+                if (bodySpeed > 0.001) {
+                  const nx = pvx / bodySpeed;
+                  const ny = pvy / bodySpeed;
+                  const ahead = -dx * nx - dy * ny;
+                  if (ahead > 0) {
+                    const sideX = -dx - ahead * nx;
+                    const sideY = -dy - ahead * ny;
+                    const side = Math.hypot(sideX, sideY) + 0.001;
+                    const push = s.magneticDeflection * bodySpeed * FRAME_MS * wake;
+                    ax += (sideX / side) * push;
+                    ay += (sideY / side) * push;
+                  }
                 }
               }
             }
           }
         }
 
+        const speedLimitSq = speedLimit * speedLimit;
         for (let i = 0; i < substeps; i++) {
           velX = (velX + ax * h) * damping;
           velY = (velY + ay * h) * damping;
+          if (speedLimit > 0) {
+            const speedSq = velX * velX + velY * velY;
+            if (speedSq > speedLimitSq) {
+              const f = speedLimit / Math.sqrt(speedSq);
+              velX *= f;
+              velY *= f;
+            }
+          }
           x += velX * h;
           y += velY * h;
         }
@@ -714,7 +1029,10 @@ export class ParticleSystem {
           l = 0;
           life[p] = 0;
           releasedAt[p] = 0;
+          bridgeSlot[p] = -1;
         }
+        renderX = x;
+        renderY = y;
       }
 
       if (wavesActive) {
@@ -747,6 +1065,23 @@ export class ParticleSystem {
         }
       }
 
+      if (resonanceActive) {
+        const dx = x - this.resonanceX;
+        const dy = y - this.resonanceY;
+        const distSq = dx * dx + dy * dy;
+        if (distSq < resonanceRadius * resonanceRadius) {
+          const dist = Math.sqrt(distSq) + 0.001;
+          const near = 1 - dist / resonanceRadius;
+          e = Math.max(e, gi.resonanceGlow * resonanceEnvelope * near * near);
+          // Sólo el campo se dispersa: los cuerpos brillan pero conservan su tracking.
+          if (m !== BODY) {
+            const push = gi.resonancePush * scale * resonanceEnvelope * near * frames * (1 - resonanceAge / gi.resonanceDurationMs);
+            velX += (dx / dist) * push;
+            velY += (dy / dist) * push;
+          }
+        }
+      }
+
       px[p] = x;
       py[p] = y;
       vx[p] = velX;
@@ -756,7 +1091,7 @@ export class ParticleSystem {
 
       const vis = b <= 0 ? 0 : b >= 1 ? 1 : b;
       const idleSize = sizeIdle * lerp(idleDepth.sizeFar, idleDepth.sizeNear, sd);
-      const twinkle = 1 - s.idleTwinkle + s.idleTwinkle * Math.sin(time * (0.32 + sd * 0.5) + phase[p]);
+      const twinkle = 1 - twinkleAmount + twinkleAmount * Math.sin(time * (0.32 + sd * 0.5) + phase[p]);
       let size = idleSize;
       let alpha = opacityIdle * lerp(idleDepth.alphaFar, idleDepth.alphaNear, sd) * twinkle * (1 + anticipation * s.formationAnticipationGlow);
       if (vis > 0) {
@@ -765,12 +1100,12 @@ export class ParticleSystem {
         size = idleSize + (bodySize - idleSize) * vis;
         alpha = alpha + (glow[p] - alpha) * vis;
       }
-      size *= scale * (1 + e * s.gestureExciteSize) * lerp(1, s.textParticleSize, textDetach);
-      alpha = (alpha + e * s.gestureExciteAlpha) * l * lerp(1, s.textParticleAlpha, textDetach);
+      size *= visualSize * scale * (1 + e * s.gestureExciteSize) * lerp(1, s.textParticleSize, textDetach);
+      alpha = (alpha * visualAlpha + e * s.gestureExciteAlpha) * l * lerp(1, s.textParticleAlpha, textDetach);
       if (alpha < 0.004) continue;
 
-      renderData[out++] = x;
-      renderData[out++] = y;
+      renderData[out++] = renderX;
+      renderData[out++] = renderY;
       renderData[out++] = size;
       renderData[out++] = alpha > 1 ? 1 : alpha;
     }
@@ -779,6 +1114,9 @@ export class ParticleSystem {
     this.detachingCount = detaching;
     this.bodyCount = bodyCount;
     this.ambientCount = ambientVisible;
+    this.trailCount = trailCount;
+    this.shedCount = shedCount;
+    this.coreCount = bodyCount - trailCount - shedCount;
     this.averageTargetDistance = targetDistanceSamples > 0 ? targetDistanceTotal / targetDistanceSamples : 0;
     let averageTrackSpeed = 0;
     if (field && field.peopleCount > 0) {
@@ -788,6 +1126,14 @@ export class ParticleSystem {
     this.estimatedTargetLagMs = averageTrackSpeed > 0.04
       ? Math.min(1000, this.averageTargetDistance / averageTrackSpeed)
       : 0;
+
+    for (let k = 0; k < peopleCount; k++) formation.report(k, personFormed[k], personBody[k], now, fw.lockThreshold);
+    this.formationProgress = formation.overallProgress(peopleCount);
+
+    let bridged = 0;
+    for (let c = 0; c < MAX_CONNECTIONS; c++) bridged += bridgeCount[c];
+    this.bridgeParticleCount = bridged;
+    if (group) this.recruitBridges(group, now);
 
     if (now - this.lastPopulationAt >= POPULATION_INTERVAL_MS) {
       this.lastPopulationAt = now;
@@ -908,6 +1254,7 @@ export class ParticleSystem {
   private rebuildOwnership(field: TargetField, now: number): void {
     for (let p = 0; p < this.capacity; p++) {
       if (this.mode[p] !== BODY) continue;
+      this.bakeOffset(p);
       this.mode[p] = AMBIENT;
       this.cell[p] = -1;
       this.particlePersonId[p] = -1;
@@ -918,8 +1265,146 @@ export class ParticleSystem {
     this.fieldVersion = field.version;
   }
 
+  /**
+   * Retraso de formación de una celda (fracción positiva de formationDuration). Antes del lock
+   * mezcla azar con distancia al centro: el torso aparece primero y las extremidades después.
+   * Tras el lock casi no hay retraso: una silueta ya formada debe crecer como espejo.
+   */
+  private formationDelay(field: TargetField, c: number): number {
+    const s = this.settings;
+    const random = this.random();
+    const personIndex = field.personIndex(field.cellPersonId[c]);
+    if (personIndex < 0) return random * s.formationStagger;
+    if (this.formation.isLocked(personIndex)) return random * s.formationStagger * s.formationWow.lockedStaggerScale;
+    const distance = Math.hypot(field.cellX[c] - field.peopleX[personIndex], field.cellY[c] - field.peopleY[personIndex]);
+    const radial = clamp01(distance / Math.max(1, this.personRadius[personIndex]));
+    return lerp(random, radial, s.formationWow.radialStagger) * s.formationStagger;
+  }
+
+  /** Al volver al campo, la partícula queda donde se veía: el offset visual pasa a ser su posición. */
+  private bakeOffset(p: number): void {
+    this.px[p] += this.offX[p];
+    this.py[p] += this.offY[p];
+    this.offX[p] = 0;
+    this.offY[p] = 0;
+    this.offVx[p] = 0;
+    this.offVy[p] = 0;
+  }
+
+  /** Geometría de cada corriente: extremos separados de los cuerpos, curvatura lenta y velocidad de flujo. */
+  private prepareBridges(group: GroupInteraction, time: number): void {
+    const gi = this.settings.groupInteraction;
+    for (let c = 0; c < MAX_CONNECTIONS; c++) {
+      this.bridgeSpan[c] = 0;
+      if (group.connectionIdA[c] < 0 || group.strength[c] < BRIDGE_RELEASE_STRENGTH) continue;
+      const dx = group.bx[c] - group.ax[c];
+      const dy = group.by[c] - group.ay[c];
+      const length = Math.hypot(dx, dy);
+      if (length < 1) continue;
+      const dirX = dx / length;
+      const dirY = dy / length;
+      const inset = Math.min(gi.endInset * this.scale, length * 0.3);
+      const span = length - inset * 2;
+      this.bridgeStartX[c] = group.ax[c] + dirX * inset;
+      this.bridgeStartY[c] = group.ay[c] + dirY * inset;
+      this.bridgeDirX[c] = dirX;
+      this.bridgeDirY[c] = dirY;
+      this.bridgeSpan[c] = span;
+      this.bridgeBend[c] = gi.curvature * span * Math.sin(time * gi.bendSpeed + group.seed[c]);
+      this.bridgeFlow[c] = gi.flowSpeed * (1 + gi.relativeSpeedBoost * group.relativeMotion[c]);
+    }
+  }
+
+  /**
+   * Recluta partículas del campo cercanas a cada corriente con un barrido acotado por frame.
+   * Sólo si un barrido completo no alcanza, aparecen unas pocas partículas sobre la corriente.
+   */
+  private recruitBridges(group: GroupInteraction, now: number): void {
+    const gi = this.settings.groupInteraction;
+    const need = this.bridgeNeed;
+    let deficit = 0;
+    for (let c = 0; c < MAX_CONNECTIONS; c++) {
+      need[c] = this.bridgeSpan[c] > 0 ? Math.max(0, group.particleBudget[c] - this.bridgeCount[c]) : 0;
+      deficit += need[c];
+    }
+    if (deficit === 0) {
+      this.bridgeSpawnAllowed = false;
+      return;
+    }
+
+    const radiusSq = (gi.recruitRadius * this.scale) ** 2;
+    const scan = Math.min(this.capacity, gi.recruitScanPerFrame);
+    const { mode, bridgeSlot, lifeTarget, life, releasedAt, px, py } = this;
+    for (let i = 0; i < scan && deficit > 0; i++) {
+      const p = (this.recruitCursor + i) % this.capacity;
+      if (mode[p] !== AMBIENT || bridgeSlot[p] >= 0 || lifeTarget[p] !== 1 || life[p] < 0.3 || this.detachAt[p] > 0) continue;
+      if (releasedAt[p] > 0 && now - releasedAt[p] < this.settings.dispersionDuration) continue;
+      for (let c = 0; c < MAX_CONNECTIONS; c++) {
+        if (need[c] === 0) continue;
+        const rx = px[p] - this.bridgeStartX[c];
+        const ry = py[p] - this.bridgeStartY[c];
+        const t = (rx * this.bridgeDirX[c] + ry * this.bridgeDirY[c]) / this.bridgeSpan[c];
+        if (t < BRIDGE_RECRUIT_MIN_T || t > BRIDGE_RECRUIT_MAX_T) continue;
+        const across = ry * this.bridgeDirX[c] - rx * this.bridgeDirY[c];
+        if (across * across > radiusSq) continue;
+        bridgeSlot[p] = c;
+        this.bridgeT[p] = t;
+        this.fadeMs[p] = gi.fadeInMs;
+        need[c]--;
+        deficit--;
+        break;
+      }
+    }
+    this.recruitCursor = (this.recruitCursor + scan) % this.capacity;
+    this.recruitSweep += scan;
+    if (this.recruitSweep >= this.capacity) {
+      this.recruitSweep = 0;
+      this.bridgeSpawnAllowed = deficit > 0;
+    }
+    if (!this.bridgeSpawnAllowed) return;
+
+    let spawns = gi.spawnPerFrame;
+    for (let c = 0; c < MAX_CONNECTIONS && spawns > 0; c++) {
+      while (need[c] > 0 && spawns > 0 && this.dormantTop > 0) {
+        const p = this.dormantStack[--this.dormantTop];
+        this.spawnAmbient(p);
+        const t = BRIDGE_RECRUIT_MIN_T + this.random() * (BRIDGE_RECRUIT_MAX_T - BRIDGE_RECRUIT_MIN_T);
+        this.px[p] = this.bridgeStartX[c] + this.bridgeDirX[c] * this.bridgeSpan[c] * t;
+        this.py[p] = this.bridgeStartY[c] + this.bridgeDirY[c] * this.bridgeSpan[c] * t;
+        this.vx[p] = 0;
+        this.vy[p] = 0;
+        this.fadeMs[p] = gi.fadeInMs;
+        bridgeSlot[p] = c;
+        this.bridgeT[p] = t;
+        need[c]--;
+        spawns--;
+      }
+    }
+  }
+
+  /** Pequeño pulso de partículas del campo donde se encuentran dos ondas; se desvanecen solas. */
+  private spawnResonancePulse(now: number): void {
+    const gi = this.settings.groupInteraction;
+    for (let i = 0; i < gi.resonanceSpawnCount && this.dormantTop > 0; i++) {
+      const p = this.dormantStack[--this.dormantTop];
+      this.spawnAmbient(p);
+      const angle = this.random() * TAU;
+      const kick = gi.resonanceKick * this.scale * (0.4 + 0.6 * this.random());
+      this.px[p] = this.resonanceX;
+      this.py[p] = this.resonanceY;
+      this.vx[p] = Math.cos(angle) * kick;
+      this.vy[p] = Math.sin(angle) * kick;
+      this.life[p] = 1;
+      this.lifeTarget[p] = 0;
+      this.fadeMs[p] = gi.resonanceDurationMs;
+      this.releasedAt[p] = now;
+      this.excite[p] = gi.resonanceGlow;
+    }
+  }
+
   private release(p: number, now: number, detachDelayMs: number): void {
     if (this.cell[p] >= 0) this.cellOwner[this.cell[p]] = -1;
+    this.bakeOffset(p);
     this.cell[p] = -1;
     this.particlePersonId[p] = -1;
     this.retargetedAt[p] = -Infinity;
@@ -950,7 +1435,7 @@ export class ParticleSystem {
     this.vx[p] = 0;
     this.vy[p] = 0;
     this.life[p] = 0;
-    this.bond[p] = -this.random() * this.settings.formationStagger;
+    this.bridgeSlot[p] = -1;
     this.glow[p] = this.settings.particleOpacity.far;
     this.proximity[p] = 0;
     this.excite[p] = 0;
@@ -973,6 +1458,7 @@ export class ParticleSystem {
     this.releasedAt[p] = 0;
     this.particlePersonId[p] = -1;
     this.retargetedAt[p] = -Infinity;
+    this.bridgeSlot[p] = -1;
     this.mode[p] = AMBIENT;
   }
 
@@ -982,6 +1468,11 @@ export class ParticleSystem {
     this.life[p] = 0;
     this.lifeTarget[p] = 0;
     this.cell[p] = -1;
+    this.bridgeSlot[p] = -1;
+    this.offX[p] = 0;
+    this.offY[p] = 0;
+    this.offVx[p] = 0;
+    this.offVy[p] = 0;
     this.particlePersonId[p] = -1;
     this.retargetedAt[p] = -Infinity;
     this.dormantStack[this.dormantTop++] = p;
@@ -1036,7 +1527,7 @@ export class ParticleSystem {
       while (excess > 0 && scanned < this.capacity) {
         const p = (this.populationCursor + scanned) % this.capacity;
         scanned++;
-        if (this.mode[p] !== AMBIENT || this.lifeTarget[p] !== 1) continue;
+        if (this.mode[p] !== AMBIENT || this.lifeTarget[p] !== 1 || this.bridgeSlot[p] >= 0) continue;
         this.lifeTarget[p] = 0;
         this.fadeMs[p] = s.dispersionDuration * (0.5 + this.random());
         excess--;

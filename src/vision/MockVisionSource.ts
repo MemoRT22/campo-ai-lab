@@ -58,6 +58,22 @@ function figureB(t: number): Figure | null {
   };
 }
 
+/** Figura C: llega por la izquierda cuando A y B ya están; tres personas activan el modo colectivo. */
+function figureC(t: number): Figure | null {
+  if (t < 18 || t > 25.5) return null;
+  const enter = ramp(t, 18, 21);
+  const exit = ramp(t, 22.5, 25.5);
+  const walking = (t < 21 || t > 22.5) ? 1 : 0;
+  return {
+    x: lerp(lerp(-0.2, 0.14, enter), -0.22, exit),
+    feet: 0.95,
+    height: 0.55,
+    armLeft: 0.2 + 0.25 * clamp01(Math.sin(t * 1.3)),
+    armRight: 0.18,
+    walk: walking * t * 6.8,
+  };
+}
+
 function limb(ctx: OffscreenCanvasRenderingContext2D, x: number, y: number, angle: number, side: number, lengths: [number, number], width: number): void {
   const bend = angle > 1.2 ? -0.25 * side : 0.15 * side;
   const ex = x + Math.sin(angle) * side * lengths[0];
@@ -168,8 +184,10 @@ export class MockVisionSource implements VisionSource {
     ctx.filter = 'blur(1px)';
     const a = figureA(t);
     const b = figureB(t);
+    const c = figureC(t);
     if (a) drawFigure(ctx, a);
     if (b) drawFigure(ctx, b);
+    if (c) drawFigure(ctx, c);
 
     const pixels = ctx.getImageData(0, 0, WIDTH, HEIGHT).data;
     const confidence = this.confidence;

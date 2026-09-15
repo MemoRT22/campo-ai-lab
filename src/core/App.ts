@@ -1,6 +1,7 @@
 import type { Config } from '../config';
 import { InteractionManager } from '../interaction/InteractionManager';
 import { GestureRecognizer } from '../interaction/GestureRecognizer';
+import { GroupInteraction } from '../particles/GroupInteraction';
 import { ParticleSystem } from '../particles/ParticleSystem';
 import { TargetField } from '../particles/TargetField';
 import { Renderer } from '../render/Renderer';
@@ -12,6 +13,7 @@ import { NegativeSpaceLayout } from '../ui/NegativeSpaceLayout';
 import { PrivacyNotice } from '../ui/PrivacyNotice';
 import { brandBlock, revealBlock, sampleTypeBlock, type TypeViewport } from '../ui/TextParticleSampler';
 import { setupKiosk } from '../utils/Kiosk';
+import { screenScale } from '../utils/MathUtils';
 import { PerformanceMonitor } from '../utils/PerformanceMonitor';
 import { CameraVisionSource } from '../vision/CameraVisionSource';
 import { MockVisionSource } from '../vision/MockVisionSource';
@@ -30,6 +32,7 @@ export class App {
   private readonly renderer: Renderer;
   private readonly field: TargetField;
   private readonly particles: ParticleSystem;
+  private readonly group: GroupInteraction;
   private readonly experience: Experience;
   private readonly interaction: InteractionManager;
   private readonly gestures: GestureRecognizer;
@@ -51,13 +54,15 @@ export class App {
     this.renderer = new Renderer(canvas, config.render, config.particles.particleCount);
     this.field = new TargetField(config);
     this.particles = new ParticleSystem(config.particles);
+    this.group = new GroupInteraction(config.particles.groupInteraction);
+    this.particles.setGroup(this.group);
     this.layout = new NegativeSpaceLayout(config.layout);
     const resolvePlacement = this.layout.resolve.bind(this.layout);
     const overlay = new InstructionOverlay(overlayRoot, resolvePlacement, config.typography.scale);
     const brand = new BrandOverlay(overlayRoot, config.branding, resolvePlacement, config.typography.scale);
     const privacy = new PrivacyNotice(overlayRoot, config.privacy, config.texts.privacy);
     this.experience = new Experience(config, overlay, brand, privacy, now);
-    this.interaction = new InteractionManager(config, this.particles, this.field, this.experience);
+    this.interaction = new InteractionManager(config, this.particles, this.field, this.experience, this.group);
     this.gestures = new GestureRecognizer(config.gestures);
     this.source = config.mockVision ? new MockVisionSource(config) : new CameraVisionSource(config);
 
@@ -101,6 +106,7 @@ export class App {
         interaction: this.interaction,
         gestures: this.gestures,
         field: this.field,
+        group: this.group,
         layout: this.layout,
         errors: this.errors,
       });
@@ -155,6 +161,7 @@ export class App {
       }
 
       this.experience.update(now, this.field.peopleCount);
+      this.group.update(this.field, now, screenScale(this.field.width, this.field.height));
 
       this.particles.step(dt, now);
       this.renderer.draw(this.particles.renderData, this.particles.renderCount);
@@ -183,6 +190,7 @@ export class App {
     const now = performance.now();
     if (event.key === '1') this.interaction.simulate('ONE_HAND_UP', now);
     else if (event.key === '2') this.interaction.simulate('BOTH_HANDS_UP', now);
+    else if (event.key === '3') this.interaction.simulateGroupWave(now);
     else if (event.key === 'd' || event.key === 'D') this.debug?.toggle();
   };
 

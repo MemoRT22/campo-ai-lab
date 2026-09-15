@@ -122,9 +122,9 @@ export const defaultConfig = {
     /* INITIAL FORMATION — entrada lenta y cinematográfica. */
     particleAttraction: 0.16,
     particleDamping: 0.6,
-    formationDuration: 780,
-    /** Retraso aleatorio de formación (fracción de formationDuration). */
-    formationStagger: 0.34,
+    formationDuration: 660,
+    /** Retraso de formación (fracción de formationDuration), repartido según formationWow.radialStagger. */
+    formationStagger: 0.4,
     formationMaxSpeed: 26,
     /** Las partículas nuevas aparecen lejos del cuerpo y viajan hacia él: se ven llegar, no encenderse. */
     spawnDistance: { min: 70, max: 300 },
@@ -137,6 +137,39 @@ export const defaultConfig = {
     formationSearchRings: 6,
     /** Brillo extra de las partículas del campo mientras son atraídas (anticipación). */
     formationAnticipationGlow: 0.45,
+    /**
+     * FORMATION WOW — anticipación → colapso → lock, por persona. Afina la formación anterior:
+     * el target siempre es la posición actual de la silueta; nada se congela.
+     */
+    formationWow: {
+      /** Multiplicador de la atracción del campo durante la ventana de formación de cada persona. */
+      anticipationBoost: 1.6,
+      /** Giro tangencial (fracción de la atracción) de las partículas atraídas: el campo se curva al activarse. */
+      anticipationCurl: 0.6,
+      /** Tras el lock el giro del campo se apaga en este tiempo: las partículas sobrantes no quedan orbitando. */
+      curlReleaseMs: 400,
+      /** Fracción de partículas que giran en el sentido dominante (0.5 = sin sentido dominante). */
+      anticipationSwirlBias: 0.72,
+      /** Atracción hacia siluetas aún no confirmadas (fracción de ambientAttraction): el campo nota la presencia antes. */
+      pendingAttraction: 0.7,
+      /** Resorte suave de las partículas ya asignadas que esperan su turno para colapsar. */
+      waitingAttraction: 0.006,
+      /** Giro durante el colapso (fracción del resorte de formación): llegan en arco, no en línea recta. */
+      collapseCurl: 0.35,
+      /** Brillo extra mientras viajan hacia el cuerpo (máximo a mitad del viaje). */
+      collapseGlow: 0.35,
+      /** 0 = retraso aleatorio; 1 = retraso según la distancia al centro del cuerpo (torso primero). */
+      radialStagger: 0.65,
+      /** Fracción del cuerpo formado desde la que la silueta queda fija en el perfil espejo. */
+      lockThreshold: 0.8,
+      /** Aceleración del enlace de las partículas restantes (y de las nuevas) tras el lock. */
+      lockSpeedup: 3,
+      /** Retraso aleatorio que conservan las partículas nuevas tras el lock (fracción de formationStagger). */
+      lockedStaggerScale: 0.15,
+      /** Pulso de brillo muy breve al fijarse la silueta. */
+      lockGlow: 0.22,
+      lockGlowMs: 320,
+    },
 
     /* NORMAL TRACKING — cuerpo ya formado: debe sentirse como espejo. */
     /** Fracción de `bond` desde la que una partícula usa el perfil de seguimiento. */
@@ -157,9 +190,34 @@ export const defaultConfig = {
     fastMotionAttraction: 0.7,
     fastMotionDamping: 0.34,
     fastMotionSnap: 0.5,
-    /** Fracción de partículas que se quedan levemente atrás y cuánto se relaja su seguimiento. */
-    fastMotionTrailRatio: 0.12,
-    fastMotionTrail: 0.55,
+
+    /**
+     * LIVING BODY — capa visual sobre el núcleo. El núcleo sigue el target con los parámetros de
+     * tracking; la estela y el desprendimiento son un offset de render que regresa solo al cuerpo.
+     */
+    livingBody: {
+      /** Fracción de partículas con inercia ligera (microestela): sobre todo en el borde. */
+      trailRatioEdge: 0.3,
+      trailRatioInterior: 0.03,
+      /** Fracción del desplazamiento del cuerpo que la partícula conserva como estela (0..1). */
+      trailInertia: 0.45,
+      /** Duración aproximada de la microestela (≈ 3 constantes de tiempo del regreso). */
+      trailDurationMs: 200,
+      trailMaxDistance: 22,
+      /** Velocidad local de la partícula (px/s de referencia) donde empieza y se completa el efecto. */
+      trailSpeed: { start: 220, full: 1000 },
+      /** Fracción de partículas de borde que se desprenden en arco con movimiento rápido. */
+      shedRatio: 0.14,
+      shedForce: 0.9,
+      shedDurationMs: 260,
+      shedMaxDistance: 34,
+      /** Estela y desprendimiento son más tenues que el núcleo. */
+      effectAlpha: 0.75,
+      /** Cuerpo quieto: temblor del interior (fracción de particleNoise) y flotación lenta del borde. */
+      interiorNoise: 0.45,
+      edgeFloat: 1.9,
+      edgeFloatSpeed: 0.5,
+    },
 
     /* Predicción e interpolación — sólo tracks estables, limitadas y sin overshoot. */
     /** Adelanto del track. 0 desactiva completamente la predicción. */
@@ -262,6 +320,77 @@ export const defaultConfig = {
     /** Tras el reveal, las mismas partículas pasan del texto a la marca y luego regresan al cuerpo. */
     brandTravelMs: 1100,
     brandReturnMs: 1200,
+
+    /**
+     * GROUP MODE — el espacio entre personas cobra vida. Sólo usa partículas del campo: las siluetas
+     * nunca ceden partículas. Usa los personId temporales; no hay identidad persistente.
+     */
+    groupInteraction: {
+      enabled: true,
+      /** Una persona cuenta para el grupo tras estar presente este tiempo. */
+      stableMs: 700,
+      /** Una ausencia breve no la saca del grupo. */
+      dropGraceMs: 500,
+      /** Histéresis del número de personas estables: tiempo sostenido para subir y para bajar de modo. */
+      enterMs: 600,
+      exitMs: 1200,
+      /** Distancia entre centros (px de referencia) donde la conexión es plena y donde desaparece. */
+      connectionDistance: { near: 420, far: 1400 },
+      pairStrength: 0.75,
+      collectiveStrength: 1,
+      maxConnections: 4,
+      /** Una conexión existente parece este factor más cercana al elegir pares (evita alternar). */
+      selectionStickiness: 0.85,
+      strengthAttackMs: 900,
+      strengthReleaseMs: 700,
+      positionSmoothingMs: 220,
+      relativeSpeedSmoothingMs: 300,
+      /** Presupuesto total de partículas del campo en las corrientes (2 personas / 3 o más). */
+      pairParticleBudget: 180,
+      collectiveParticleBudget: 440,
+      /** Radio (px de referencia) alrededor de la línea entre dos personas donde se reclutan partículas. */
+      recruitRadius: 380,
+      recruitScanPerFrame: 900,
+      /** Si faltan partículas cerca, aparecen unas pocas por frame sobre la corriente. */
+      spawnPerFrame: 3,
+      fadeInMs: 450,
+      /** Separación de cada extremo respecto al centro de la persona (px de referencia). */
+      endInset: 130,
+      /** Ancho, curvatura y respiración de la corriente. */
+      width: 42,
+      curvature: 0.12,
+      bendSpeed: 0.18,
+      /** Recorrido de la corriente (fracción de su longitud por segundo) y refuerzo por movimiento relativo. */
+      flowSpeed: 0.12,
+      relativeSpeedBoost: 1.5,
+      relativeSpeedFull: 600,
+      attraction: 0.02,
+      damping: 0.9,
+      maxSpeed: 3.2,
+      /** Brillo y tamaño de las partículas en la corriente (multiplicadores sobre el campo). */
+      alpha: 2.6,
+      size: 1.3,
+      /** Modo colectivo: fracción de partículas que forman pequeños nodos entre personas. */
+      nodeRatio: 0.22,
+      nodeRadius: 26,
+      nodeSpin: 0.6,
+      /** Modo colectivo: el campo completo se vuelve más activo. */
+      collectiveAmbientDrift: 0.8,
+      collectiveTwinkle: 0.5,
+      energyAttackMs: 1200,
+      energyReleaseMs: 1800,
+      /** Energía del campo con dos personas (fracción de la del modo colectivo). */
+      pairEnergy: 0.3,
+      /** ONE_HAND_UP casi simultáneo de dos personas: las ondas se encuentran. */
+      resonanceWindowMs: 700,
+      resonanceMaxDelayMs: 450,
+      resonanceRadius: 180,
+      resonanceDurationMs: 700,
+      resonanceGlow: 0.6,
+      resonancePush: 1.2,
+      resonanceSpawnCount: 28,
+      resonanceKick: 2.4,
+    },
   },
 
   render: {

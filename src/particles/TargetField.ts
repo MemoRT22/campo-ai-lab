@@ -96,6 +96,13 @@ export class TargetField {
    */
   readonly peopleCellShiftX: Int32Array;
   readonly peopleCellShiftY: Int32Array;
+  /**
+   * Siluetas detectadas que aún no se confirman (px CSS). No forman cuerpo: sólo permiten que el
+   * campo note la presencia unos milisegundos antes de la formación.
+   */
+  pendingCount = 0;
+  readonly pendingX: Float32Array;
+  readonly pendingY: Float32Array;
   /** Momento del último frame de visión aplicado (performance.now()). */
   lastVisionAt = 0;
   /** Copia de la última detección para mapear gestos. */
@@ -149,6 +156,8 @@ export class TargetField {
     this.peopleInterpolationVy = new Float32Array(slots);
     this.peopleCellShiftX = new Int32Array(slots);
     this.peopleCellShiftY = new Int32Array(slots);
+    this.pendingX = new Float32Array(slots);
+    this.pendingY = new Float32Array(slots);
     this.slotBox = new Float32Array(slots * 4);
     this.slotClip = new Uint8Array(slots);
   }
@@ -197,6 +206,7 @@ export class TargetField {
     this.mappingKey = '';
     this.activeCount = 0;
     this.peopleCount = 0;
+    this.pendingCount = 0;
     this.peopleId.fill(-1);
     this.peopleVx.fill(0);
     this.peopleVy.fill(0);
@@ -229,8 +239,15 @@ export class TargetField {
 
     this.lastPeople.length = 0;
     const { crop } = cfg.camera;
+    this.pendingCount = 0;
     for (const person of frame.people) {
       this.lastPeople.push({ ...person });
+      if (!person.confirmed && this.pendingCount < this.pendingX.length) {
+        const point = this.cameraToScreen(person.cx, person.cy, this.edgePoint);
+        this.pendingX[this.pendingCount] = point.x;
+        this.pendingY[this.pendingCount] = point.y;
+        this.pendingCount++;
+      }
       if (!person.confirmed || person.slot >= slotKeep.length) continue;
       slotProximity[person.slot] = person.proximity;
       slotKeep[person.slot] = lerp(far, close, person.proximity);
@@ -318,6 +335,7 @@ export class TargetField {
     this.active.fill(0);
     this.activeCount = 0;
     this.peopleCount = 0;
+    this.pendingCount = 0;
     this.peopleId.fill(-1);
     this.peopleVx.fill(0);
     this.peopleVy.fill(0);

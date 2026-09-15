@@ -2,6 +2,7 @@ import type { Config } from '../config';
 import type { Experience } from '../core/Experience';
 import type { InteractionManager } from '../interaction/InteractionManager';
 import type { GestureRecognizer } from '../interaction/GestureRecognizer';
+import { GROUP_MODE_LABELS, type GroupInteraction } from '../particles/GroupInteraction';
 import type { ParticleSystem } from '../particles/ParticleSystem';
 import type { TargetField } from '../particles/TargetField';
 import type { PerformanceMonitor } from '../utils/PerformanceMonitor';
@@ -34,6 +35,7 @@ export interface DebugContext {
   interaction: InteractionManager;
   gestures: GestureRecognizer;
   field: TargetField;
+  group: GroupInteraction;
   layout: NegativeSpaceLayout;
   errors: string[];
 }
@@ -70,7 +72,7 @@ export class DebugPanel {
     this.stats.className = 'debug__stats';
     const help = document.createElement('div');
     help.className = 'debug__help';
-    help.textContent = '1 mano · 2 dos manos · D panel · F pantalla completa';
+    help.textContent = '1 mano · 2 dos manos · 3 ondas de dos personas · D panel · F pantalla completa';
     this.el.append(this.maskCanvas, this.stats, help);
     root.appendChild(this.el);
   }
@@ -148,7 +150,7 @@ export class DebugPanel {
     if (this.el.hidden || now - this.lastTextAt < TEXT_INTERVAL_MS) return;
     this.lastTextAt = now;
     this.attachVideo();
-    const { perf, particles, source, experience, interaction, gestures, field, errors } = this.ctx;
+    const { perf, particles, source, experience, interaction, gestures, field, group, errors } = this.ctx;
     const status = source.status;
     const gesture = interaction.lastGesture;
     let predictionCount = 0;
@@ -171,6 +173,9 @@ export class DebugPanel {
       `tracking    ${this.ctx.config.particles.trackingResponseMs} ms · prediction ${this.ctx.config.particles.predictionMs} ms · activos ${predictionCount}`,
       `texto       lado ${this.ctx.layout.side} · ocupación izq ${(this.ctx.layout.occupancyLeft * 100).toFixed(0)}% · der ${(this.ctx.layout.occupancyRight * 100).toFixed(0)}% · arriba ${(this.ctx.layout.occupancyTop * 100).toFixed(0)}%`,
       `fases       formación ${particles.motionPhaseCounts[0]} · tracking ${particles.motionPhaseCounts[1]} · rápido ${particles.motionPhaseCounts[2]} · departure ${particles.motionPhaseCounts[3]}`,
+      `formación   ${(particles.formationProgress * 100).toFixed(0)}%`,
+      `cuerpo vivo núcleo ${particles.coreCount} · estela ${particles.trailCount} · borde ${particles.shedCount}`,
+      `grupo       ${group.stableCount} estables · ${GROUP_MODE_LABELS[group.mode]} · ${group.connectionCount} conexiones · ${particles.bridgeParticleCount} partículas`,
       `target lag  ${particles.averageTargetDistance.toFixed(1)} px promedio · ~${particles.estimatedTargetLagMs.toFixed(0)} ms`,
       `transporte  ${particles.shiftedLastFrame} trasladadas · ${particles.transportedLastFrame} reasignadas · ${particles.releasedLastFrame} liberadas · ${particles.spawnedLastFrame} spawn · ${particles.heldLastFrame} retenidas`,
       `tracks      ${motion.length ? motion.join(' | ') : '—'}`,
