@@ -99,6 +99,23 @@ Todo vive en [`src/config.ts`](src/config.ts). No hay números mágicos repartid
 3. Ajustar `maskThreshold`, `minPersonArea` y `crop` hasta que reflejos y sombras dejen de aparecer.
 4. Subir `typography.scale` hasta que el texto se lea a la distancia real.
 
+### Detalle de silueta
+
+La forma de cada persona sigue el contorno real de la máscara, no una cuadrícula de píxeles:
+
+- **Contorno subpíxel.** El worker envía, junto con el mapa de siluetas, la confianza ya suavizada (0..255). `TargetField` la interpola en la posición exacta de cada celda. Así la retícula (`particleSpacing` 5.5 px de referencia) puede ser más fina que un píxel de máscara (~6 px a 1080p) sin escalones.
+- **Borde sobre el contorno.** Cada celda de borde se desplaza sobre el gradiente de confianza hasta `silhouette.contourThreshold` (0.5), con tope `maxSnap`. El borde no usa jitter y flota apenas (`livingBody.edgeFloat`). Tiene brillo extra con `edgeBrightness`.
+- **Sin parpadeo.** Cada celda tiene histéresis propia (`contourHysteresis`).
+- **Densidad.** `particleCount` 24 000, `bodyParticleBudget` 15 000 y sin diezmar a las personas lejanas (`particleDensity`). Si varias personas superan el presupuesto, sólo se aclara el interior: el contorno se conserva (`silhouette.protectEdges`).
+
+| Escena simulada (1080p, pipeline máscara → partículas) | Antes | Ahora |
+| --- | --- | --- |
+| Partículas por silueta de cuerpo completo | ~1 600 | ~4 600 |
+| Tres personas: partículas de cuerpo | ~4 900 | ~13 800 |
+| Tres personas: JS de simulación por frame | ~2 ms | ~4.5 ms (+ ~1.1 ms de máscara → retícula en promedio) |
+
+En Chrome con `?mock=true` se midieron 3–4 ms de JS por frame con 1–3 personas. En equipos lentos se puede bajar el costo sin recompilar: `?particles.particleSpacing=6.5&particles.bodyParticleBudget=10000`. Si antes se guardó calibración con `?calibrate=true`, el `particleSpacing` guardado reemplaza el nuevo valor: usa *RESTABLECER* en el panel.
+
 ### Mirror feel: fases de movimiento
 
 Cada partícula del cuerpo usa tiempos distintos según su fase. El panel `?debug=true` muestra cuántas hay en cada una.
@@ -261,7 +278,7 @@ src/
     MockVisionSource.ts     siluetas sintéticas para desarrollo
     protocol.ts, types.ts   contratos
   particles/
-    TargetField.ts          máscara → retícula estable en pantalla
+    TargetField.ts          máscara + confianza → retícula estable con contorno subpíxel
     ParticleSystem.ts       física, formación, dispersión, ondas, offset vivo, corrientes
     FormationTracker.ts     formación por persona: inicio, progreso y lock
     GroupInteraction.ts     personas estables, modo, pares, fuerza y presupuesto (puro)
@@ -307,7 +324,7 @@ Pérdidas breves de detección (menos de 900 ms) no cuentan como salida. Si la p
 ## Privacidad
 
 - **Qué se almacena: nada personal.** Ni frames, capturas, video, landmarks ni identificadores se escriben en almacenamiento. Cada imagen se cierra al terminar el frame.
-- **Qué sale del worker.** Un mapa de siluetas de baja resolución, cajas anónimas y landmarks transitorios para gesto/debug. No salen del navegador ni se persisten.
+- **Qué sale del worker.** Un mapa de siluetas y su confianza (ambos de baja resolución, 320×180, sin imagen), cajas anónimas y landmarks transitorios para gesto/debug. No salen del navegador ni se persisten.
 - **Red.** No hay conexiones de red: el documento declara una CSP con `connect-src 'self'`, y el modelo y el runtime se sirven localmente.
 - **Reconocimiento facial.** No existe. Los ids de silueta sólo dan continuidad entre frames consecutivos y se descartan al perder a la persona.
 - **En producción** no se muestra ninguna imagen de cámara. El video sólo es visible con `?debug=true`.
@@ -324,7 +341,7 @@ Pérdidas breves de detección (menos de 900 ms) no cuentan como salida. Si la p
 
 ## Verificación
 
-`npm test` (51 pruebas), `npm run typecheck` y `npm run build` validan lógica pura, contratos TypeScript y bundle de producción. Las pruebas cubren, entre otras cosas, la traslación de la silueta al caminar sin overshoot, la predicción ante brazos/frenado/giro, el departure escalonado, el reveal sin pérdida de tracking, la elección de espacio negativo, el lock de formación por persona, que la estela visual no altere el núcleo espejo, la histéresis y selección de pares del modo grupo, los presupuestos de partículas y la resonancia de gestos. La medición motion-to-photon sigue siendo una prueba física externa con video de alta velocidad.
+`npm test` (56 pruebas), `npm run typecheck` y `npm run build` validan lógica pura, contratos TypeScript y bundle de producción. Las pruebas cubren, entre otras cosas, la traslación de la silueta al caminar sin overshoot, la predicción ante brazos/frenado/giro, el departure escalonado, el reveal sin pérdida de tracking, la elección de espacio negativo, el lock de formación por persona, que la estela visual no altere el núcleo espejo, la histéresis y selección de pares del modo grupo, los presupuestos de partículas y la resonancia de gestos, el contorno subpíxel, la histéresis por celda y la protección del contorno ante el presupuesto. La medición motion-to-photon sigue siendo una prueba física externa con video de alta velocidad.
 
 ## Créditos y licencias
 
