@@ -1,8 +1,7 @@
 import type { Config } from '../config';
 import type { GestureEvent } from '../interaction/GestureEvents';
-import type { BrandOverlay } from '../ui/BrandOverlay';
-import type { InstructionOverlay } from '../ui/InstructionOverlay';
-import type { PrivacyNotice } from '../ui/PrivacyNotice';
+import type { BrandPlacement } from '../ui/BrandOverlay';
+import type { InstructionMessage } from '../ui/InstructionOverlay';
 import { StateMachine } from './StateMachine';
 
 export type ExperienceState = 'idle' | 'presence' | 'departure';
@@ -15,6 +14,24 @@ interface Session {
   secondHint: boolean;
   revealAt: number;
   brandShown: boolean;
+}
+
+export interface ExperienceOverlay {
+  readonly activeId: string | null;
+  show(message: InstructionMessage, now: number): boolean;
+  hide(id: string | null, now: number): void;
+  update(now: number): void;
+}
+
+export interface ExperienceBrand {
+  show(now: number, durationMs: number, placement: BrandPlacement): void;
+  hide(): void;
+  update(now: number): void;
+}
+
+export interface ExperiencePrivacy {
+  request(now: number, delayMs: number): void;
+  update(now: number): void;
 }
 
 const ID = {
@@ -47,9 +64,9 @@ export class Experience {
 
   constructor(
     private readonly config: Config,
-    private readonly overlay: InstructionOverlay,
-    private readonly brand: BrandOverlay,
-    private readonly privacy: PrivacyNotice,
+    private readonly overlay: ExperienceOverlay,
+    private readonly brand: ExperienceBrand,
+    private readonly privacy: ExperiencePrivacy,
     now: number,
   ) {
     this.machine = new StateMachine<ExperienceState>(
@@ -97,12 +114,12 @@ export class Experience {
     if (this.machine.current !== 'presence' || !session) return;
     const { texts, experience } = this.config;
 
-    if (event.type === 'hand-raised' && session.gestureOneAt < 0) {
+    if (event.type === 'ONE_HAND_UP' && session.gestureOneAt < 0) {
       session.gestureOneAt = now;
       this.overlay.hide(ID.raiseHand, now);
     }
 
-    if (event.type === 'both-hands-raised' && (session.revealAt < 0 || now - session.revealAt > experience.revealDurationMs)) {
+    if (event.type === 'BOTH_HANDS_UP' && session.revealAt < 0) {
       session.revealAt = now;
       session.secondHint = true;
       if (session.gestureOneAt < 0) session.gestureOneAt = now;

@@ -9,8 +9,8 @@ export class InteractionManager {
   lastGesture: GestureEvent | null = null;
 
   private readonly lastTriggered: Record<GestureType, number> = {
-    'hand-raised': -Infinity,
-    'both-hands-raised': -Infinity,
+    ONE_HAND_UP: -Infinity,
+    BOTH_HANDS_UP: -Infinity,
   };
   private readonly screenPoint = { x: 0, y: 0 };
 
@@ -27,7 +27,7 @@ export class InteractionManager {
     this.lastTriggered[event.type] = now;
     this.lastGesture = event;
 
-    if (event.type === 'hand-raised') {
+    if (event.type === 'ONE_HAND_UP') {
       for (const point of event.points) this.waveAt(point, now, 1);
     } else {
       this.particles.loosen(now, this.config.experience.revealScatterMs, 3);
@@ -45,13 +45,13 @@ export class InteractionManager {
     const top = person ? person.y0 + (person.y1 - person.y0) * 0.06 : 0.35;
     const width = x1 - x0;
     const points: GesturePoint[] =
-      type === 'hand-raised'
+      type === 'ONE_HAND_UP'
         ? [{ x: x0 + width * 0.18, y: top }]
         : [
             { x: x0 + width * 0.18, y: top },
             { x: x1 - width * 0.18, y: top },
           ];
-    this.handle({ type, personId: person ? person.id : -1, points, timestamp: now, source: 'simulated' }, now);
+    this.handle({ type, personId: person ? person.id : -1, points, timestamp: now, confidence: 1, source: 'simulated' }, now);
   }
 
   private waveAt(point: GesturePoint, now: number, strength: number): void {

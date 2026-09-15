@@ -137,6 +137,9 @@ export class MockVisionSource implements VisionSource {
       timestamp: 0,
       inferenceMs: 0,
       processingMs: 0,
+      poses: [],
+      poseTimestamp: null,
+      poseInferenceMs: 0,
     };
     this.status.camera = 'live';
     this.status.cameraDetail = 'Fuente sintética (mock)';

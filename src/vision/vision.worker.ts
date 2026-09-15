@@ -1,13 +1,18 @@
 import { MaskProcessor } from './MaskProcessor';
 import { PersonSegmenter } from './PersonSegmenter';
+import { PoseLandmarkerRunner } from './PoseLandmarkerRunner';
 import type { FrameMessage, FromWorker, InitMessage, ToWorker } from './protocol';
+import type { PersonInfo, PoseInfo } from './types';
 
-// Todo lo que toca píxeles de la cámara vive aquí. Los frames se cierran al terminar
-// y sólo sale del worker el mapa de siluetas: ninguna imagen se conserva ni se envía.
+// Todo lo que toca píxeles de la cámara vive aquí. Los frames se cierran al terminar;
+// sólo salen la máscara, cajas y landmarks transitorios: ninguna imagen se conserva.
 
 const segmenter = new PersonSegmenter();
+const poseLandmarker = new PoseLandmarkerRunner();
 let processor: MaskProcessor | null = null;
 let ready = false;
+let poseIntervalMs = 1000 / 15;
+let lastPoseAt = -Infinity;
 
 function post(message: FromWorker, transfer: Transferable[] = []): void {
   self.postMessage(message, { transfer });
@@ -21,10 +26,12 @@ async function init(message: InitMessage): Promise<void> {
   try {
     processor = new MaskProcessor(message.settings);
     await segmenter.init(message.wasmBaseUrl, message.modelUrl, message.delegate);
+    await poseLandmarker.init(message.poseWasmBaseUrl, message.poseModelUrl, message.delegate, message.visionSettings);
+    poseIntervalMs = 1000 / message.visionSettings.poseFPS;
     ready = true;
     post({ type: 'ready', delegate: segmenter.delegate, labels: segmenter.labels });
   } catch (error) {
-    post({ type: 'error', fatal: true, duringInit: true, message: `No se pudo iniciar el segmentador (${message.delegate}): ${describe(error)}` });
+    post({ type: 'error', fatal: true, duringInit: true, message: `No se pudo iniciar visión (${message.delegate}): ${describe(error)}` });
   }
 }
 
@@ -36,22 +43,44 @@ function handleFrame(message: FrameMessage): void {
     if (ready && processor) {
       const mask = processor;
       const started = performance.now();
-      segmenter.segment(bitmap, timestamp, (confidence, width, height) => {
-        const inferenceMs = performance.now() - started;
+      let width = 0;
+      let height = 0;
+      const output: { personMap: Uint8Array | null } = { personMap: null };
+      let people: PersonInfo[] = [];
+      let inferenceMs = 0;
+      let processingMs = 0;
+      segmenter.segment(bitmap, timestamp, (confidence, maskWidth, maskHeight) => {
+        inferenceMs = performance.now() - started;
+        width = maskWidth;
+        height = maskHeight;
         const size = width * height;
-        const personMap = recycled && recycled.byteLength === size ? new Uint8Array(recycled) : new Uint8Array(size);
+        output.personMap = recycled && recycled.byteLength === size ? new Uint8Array(recycled) : new Uint8Array(size);
         const processingStarted = performance.now();
-        const people = mask.process(confidence, width, height, timestamp, personMap);
-        const processingMs = performance.now() - processingStarted;
-        produced = true;
-        post(
-          { type: 'result', width, height, personMap: personMap.buffer, people, timestamp, inferenceMs, processingMs },
-          [personMap.buffer],
-        );
+        people = mask.process(confidence, width, height, timestamp, output.personMap);
+        processingMs = performance.now() - processingStarted;
       });
+      const personMap = output.personMap;
+      if (personMap) {
+        let poses: PoseInfo[] = [];
+        let poseTimestamp: number | null = null;
+        let poseInferenceMs = 0;
+        if (timestamp - lastPoseAt >= poseIntervalMs - 1) {
+          const poseStarted = performance.now();
+          poses = poseLandmarker.detect(bitmap, timestamp);
+          poseInferenceMs = performance.now() - poseStarted;
+          poseTimestamp = timestamp;
+          lastPoseAt = timestamp;
+        }
+        produced = true;
+        const personMapBuffer = personMap.buffer as ArrayBuffer;
+        post(
+          { type: 'result', width, height, personMap: personMapBuffer, people, timestamp, inferenceMs, processingMs, poses, poseTimestamp, poseInferenceMs },
+          [personMapBuffer],
+        );
+      }
     }
   } catch (error) {
-    post({ type: 'error', fatal: false, duringInit: false, message: `Fallo de inferencia: ${describe(error)}` });
+    post({ type: 'error', fatal: false, duringInit: false, message: `Fallo del pipeline de visión: ${describe(error)}` });
   } finally {
     bitmap.close();
   }

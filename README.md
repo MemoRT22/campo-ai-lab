@@ -32,7 +32,7 @@ npm run dev
 
 Abre `http://localhost:5180`, permite el acceso a la cámara y colócate frente a ella.
 
-`npm install` copia el runtime WASM de MediaPipe a `public/mediapipe/wasm`. El modelo de segmentación ya está incluido en `public/models`. No se necesita internet para ejecutar.
+`npm install` copia dos instancias locales del runtime WASM de MediaPipe (segmentación y Pose). Ambos modelos están incluidos en `public/models`. No se necesita internet para ejecutar.
 
 ### Modos útiles
 
@@ -40,6 +40,7 @@ Abre `http://localhost:5180`, permite el acceso a la cámara y colócate frente 
 | --- | --- |
 | `/?mock=true` | Siluetas sintéticas: prueba la experiencia sin cámara ni personas |
 | `/?debug=true` | Panel técnico: cámara, máscara, cajas, FPS, inferencia, partículas y estado |
+| `/?calibrate=true` | Debug + cámara, máscara, Pose, ROI y controles técnicos persistibles |
 | `/?mock=true&debug=true` | Ambos |
 
 **Teclado en debug:**
@@ -69,7 +70,8 @@ Todo vive en [`src/config.ts`](src/config.ts). No hay números mágicos repartid
 | Sección | Qué controla |
 | --- | --- |
 | `camera` | Resolución, cámara, espejo, encuadre (`cover`/`contain`), recorte útil (`crop`), reintentos |
-| `vision` | `processingFPS`, ancho de inferencia, delegado GPU/CPU, `maskThreshold`, histéresis, suavizado, área mínima, `maxPeople`, confirmación de presencia |
+| `vision` | FPS independientes de segmentación/Pose, ancho, delegado GPU/CPU, umbrales, suavizado, área mínima, `maxPeople`, watchdog y fallback |
+| `gestures` | Visibilidad, margen, suavizado, histéresis, tiempos mínimos y gracia de ausencia |
 | `proximity` | Qué tamaño aparente cuenta como lejos o cerca |
 | `particles` | `particleCount`, `idleParticleCount`, `particleSpacing`, `particleDensity`, `particleSize`, `particleOpacity`, `particleNoise`, `particleAttraction`, `particleDamping`, `formationDuration`, `dispersionDuration`, onda de gesto |
 | `experience` | Tiempos de la narrativa: saludo, instrucciones, `instructionTimeout`, `gestureCooldown`, gracia de ausencia, marca |
@@ -90,7 +92,7 @@ Todo vive en [`src/config.ts`](src/config.ts). No hay números mágicos repartid
 
 **Calibración recomendada en el ventanal:**
 
-1. Abrir con `?debug=true`.
+1. Abrir con `?calibrate=true`.
 2. Revisar la máscara con distintas luces (mañana, tarde, noche).
 3. Ajustar `maskThreshold`, `minPersonArea` y `crop` hasta que reflejos y sombras dejen de aparecer.
 4. Subir `typography.scale` hasta que el texto se lea a la distancia real.
@@ -145,17 +147,18 @@ Cámara ─▶ CameraManager ─▶ ImageBitmap 320×180 ─┐
                                                ▼
                          ┌──────── Web Worker (vision.worker.ts) ────────┐
                          │ PersonSegmenter  (MediaPipe ImageSegmenter)   │
+                         │ PoseLandmarkerRunner (10–20 FPS configurable) │
                          │ MaskProcessor    blur → suavizado temporal →  │
                          │                  histéresis → componentes →   │
                          │                  área mínima → proximidad     │
                          └───────────────┬───────────────────────────────┘
-                                         │ personMap (Uint8) + personas
+                                         │ personMap + personas + pose transitoria
                                          ▼
 requestAnimationFrame ─▶ TargetField ─▶ ParticleSystem ─▶ Renderer (WebGL2)
                               │
                               └─▶ Experience (máquina de estados) ─▶ overlays
                                         ▲
-                     InteractionManager ┘  ◀── GestureEvents (Fase 4)
+             GestureRecognizer ─▶ InteractionManager ┘  ◀── GestureEvents
 ```
 
 ```text
@@ -166,12 +169,15 @@ src/
     App.ts                  orquestador: un solo requestAnimationFrame
     StateMachine.ts         máquina de estados genérica
     Experience.ts           IDLE → PRESENCE → DEPARTURE, qué se dice y cuándo
-    configOverrides.ts      overrides por URL
+    configOverrides.ts      overrides por URL y calibración técnica local
+    configValidation.ts     rangos, clamps y defaults seguros
   vision/
     CameraManager.ts        permisos, selección, pérdida y reconexión de cámara
     CameraVisionSource.ts   captura, worker, reintentos, fallback GPU → CPU
     vision.worker.ts        todo lo que toca píxeles vive aquí
     PersonSegmenter.ts      MediaPipe ImageSegmenter
+    PoseLandmarkerRunner.ts MediaPipe Pose Landmarker (mismo worker/frame)
+    WorkerRecoveryPolicy.ts circuito GPU → CPU sin oscilación
     MaskProcessor.ts        limpieza de máscara y siluetas (código puro)
     MockVisionSource.ts     siluetas sintéticas para desarrollo
     protocol.ts, types.ts   contratos
@@ -183,19 +189,23 @@ src/
     Renderer.ts             WebGL2, un draw call de puntos
   interaction/
     GestureEvents.ts        contrato de gestos
+    GestureRecognizer.ts    landmarks → flancos ONE_HAND_UP/BOTH_HANDS_UP
     InteractionManager.ts   gesto → reacción visual + narrativa
   ui/
     InstructionOverlay.ts   mensajes con prioridad, timeout y fundido
     BrandOverlay.ts
     PrivacyNotice.ts
     DebugPanel.ts           sólo existe con ?debug
+    CalibrationPanel.ts     controles de instalación con ?calibrate=true
   utils/
     PerformanceMonitor.ts, MathUtils.ts, noise.ts, Kiosk.ts
 ```
 
 ### Decisiones clave
 
-- **Visión en un Web Worker.** La inferencia nunca bloquea el render. Hay un solo frame en vuelo: si el modelo se atrasa se descartan capturas, en lugar de acumular latencia. Los buffers de máscara se reciclan entre hilos.
+- **Visión en un Web Worker.** Segmentación y Pose consumen el mismo `ImageBitmap`; Pose corre a menor frecuencia. Hay un solo frame en vuelo: si el modelo se atrasa se descartan capturas, en lugar de acumular latencia. Los buffers de máscara se reciclan entre hilos.
+- **Gestos por flanco.** Mantener una mano arriba no repite el evento. Bajarla rearma el gesto; la ausencia breve conserva el estado.
+- **Fallback estable.** Varios fallos GPU reinician el worker y fijan CPU durante el resto de la sesión, sin alternar delegados.
 - **WebGL2 directo, no Three.js ni PixiJS.** Es una sola primitiva (puntos suaves con mezcla aditiva) en un solo draw call. Una librería de escena no aporta nada aquí y Canvas 2D no escala a miles de puntos suaves en pantallas grandes.
 - **Retícula estable.** Cada partícula es dueña de una celda fija de pantalla. Si la persona está quieta, nada se mueve salvo la "respiración". Al moverse, sólo migran las partículas de las celdas que cambian, hacia las más cercanas. Remuestrear la máscara en cada frame haría que la silueta "hierva".
 - **Sin React.** No hay estado de UI que lo justifique.
@@ -205,35 +215,34 @@ src/
 | Estado | Pantalla |
 | --- | --- |
 | **IDLE** | Campo de partículas lento y orgánico. "ACÉRCATE". Aviso de privacidad periódico. |
-| **PRESENCE** | Las partículas cercanas se sienten atraídas y forman la silueta. "TÚ ERES EL INPUT". A los ~3 s, "LEVANTA UNA MANO". Tras el gesto, "PRUEBA CON LAS DOS". Con las dos manos, la silueta se afloja y aparece "COMPUTER VISION". Después, la marca del laboratorio. |
+| **PRESENCE** | Las partículas forman la silueta. "TÚ ERES EL INPUT" → "LEVANTA UNA MANO" → "AHORA PRUEBA CON LAS DOS" → "COMPUTER VISION". Después queda en modo libre y aparece la marca. |
 | **DEPARTURE** | La silueta conserva el momentum, se fragmenta y se dispersa. Si hubo interacción, aparece la marca. Luego vuelve a IDLE. |
 
 Pérdidas breves de detección (menos de 900 ms) no cuentan como salida. Si la persona regresa en menos de 8 s, la secuencia continúa sin repetir el saludo.
 
 ## Privacidad
 
-- **Qué se almacena: nada.** Ni frames, ni capturas, ni video, ni landmarks, ni identificadores. Cada frame vive sólo lo que dura su inferencia y se cierra en el worker.
-- **Qué sale del worker.** Sólo un mapa de siluetas de baja resolución y cajas envolventes anónimas.
+- **Qué se almacena: nada personal.** Ni frames, capturas, video, landmarks ni identificadores se escriben en almacenamiento. Cada imagen se cierra al terminar el frame.
+- **Qué sale del worker.** Un mapa de siluetas de baja resolución, cajas anónimas y landmarks transitorios para gesto/debug. No salen del navegador ni se persisten.
 - **Red.** No hay conexiones de red: el documento declara una CSP con `connect-src 'self'`, y el modelo y el runtime se sirven localmente.
 - **Reconocimiento facial.** No existe. Los ids de silueta sólo dan continuidad entre frames consecutivos y se descartan al perder a la persona.
 - **En producción** no se muestra ninguna imagen de cámara. El video sólo es visible con `?debug=true`.
 
 ## Limitaciones conocidas
 
-- **Sin detección real de gestos todavía.** Las instrucciones de mano aparecen y expiran; los gestos se prueban con las teclas `1` y `2` en debug. La arquitectura para Fase 4 está lista.
 - **Personas lejanas.** El segmentador de MediaPipe está entrenado para distancias de selfie y videollamada: más allá de ~3–4 m pierde definición.
 - **Personas juntas.** Dos personas que se tocan se funden en una silueta. Es segmentación semántica, no por instancias.
+- **Multipose.** Se solicitan hasta cuatro poses, pero el modelo lite puede perder personas lejanas, ocluidas o muy juntas; la máscara sigue siendo semántica y no se asigna como instancia perfecta.
 - **Reflejos del vidrio.** Pueden generar siluetas falsas, sobre todo de noche. Se mitiga con `crop`, área mínima y la instalación física de la cámara (ver análisis).
 - **Tamaños de texto.** Están calibrados para laptop. En la pantalla real hay que subir `typography.scale`.
 - **Mediciones pendientes con cámara real.** Los tiempos de inferencia se midieron con frames sintéticos: falta confirmar la latencia completa cámara → partículas.
 - **Navegador.** Sólo se prueba en Chrome/Chromium.
 
-## Próximas fases
+## Verificación
 
-- **Fase 4:** `PoseLandmarker` en el mismo worker a 10–15 Hz. `GestureRecognizer` con histéresis y flanco de subida, que emita los mismos `GestureEvents` que hoy se simulan.
-- **Fase 5:** logo real, colores institucionales opcionales y ajuste en sitio.
+`npm test`, `npm run typecheck` y `npm run build` validan lógica pura, contratos TypeScript y bundle de producción. La medición motion-to-photon sigue siendo una prueba física externa con video de alta velocidad.
 
 ## Créditos y licencias
 
-- **Runtime y modelo.** MediaPipe Tasks Vision y el modelo `selfie_segmenter_landscape` de Google (Apache 2.0; ver la *model card* de MediaPipe).
+- **Runtime y modelos.** MediaPipe Tasks Vision, `selfie_segmenter_landscape` y `pose_landmarker_lite` de Google (Apache 2.0; ver sus model cards).
 - **Tipografías.** Geist y Geist Mono (SIL Open Font License), vía Fontsource.

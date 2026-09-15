@@ -14,15 +14,17 @@ Es viable como aplicación 100 % web en Chromium, corriendo en una sola computad
 
 | Propuesta | Problema | Decisión |
 | --- | --- | --- |
-| Segmentación y pose como pipelines separados | Separarlos en código es correcto. Dos capturas o dos loops de cámara duplican trabajo y desincronizan máscara y landmarks. | Una sola captura por frame y un solo worker. En Fase 4 la pose correrá en el mismo worker, a menor frecuencia (10–15 Hz). |
+| Segmentación y pose como pipelines separados | Separarlos en código es correcto. Dos capturas o dos loops de cámara duplican trabajo y desincronizan máscara y landmarks. | Una sola captura por frame y un solo worker. Pose corre en el mismo worker a menor frecuencia (configurable). |
 | Muestrear la máscara y asignar `targetPosition` en cada frame | **El problema más importante del proyecto.** Si los puntos se remuestrean en cada frame, un brazo que se mueve reordena todos los índices: las partículas cruzan el cuerpo y la silueta "hierve" en vez de moverse. | `TargetField` usa una retícula **fija en pantalla**. Cada celda activa tiene una partícula dueña; sólo las celdas que se encienden o apagan provocan movimiento, y las libres se reasignan a la partícula más cercana. |
 | `Particle.ts` con un objeto por partícula | Miles de objetos por frame presionan al GC y fragmentan memoria. `acceleration` no necesita almacenarse. | Estructura de arreglos (`Float32Array`) en `ParticleSystem`. Cero allocations por frame. |
 | Three.js / PixiJS / `Scene.ts` | Es un solo tipo de primitiva (puntos) sin grafo de escena. Las librerías agregan peso y capas sin aportar nada aquí. | WebGL2 directo: un buffer y un `drawArrays(GL_POINTS)`. |
-| Cooldown para no repetir gestos | Con las manos arriba, el gesto se vuelve a disparar al terminar el cooldown. | El reconocedor (Fase 4) debe emitir **flancos de subida** y exigir bajar las manos antes de rearmar. El cooldown queda como segunda red. |
+| Cooldown para no repetir gestos | Con las manos arriba, el gesto se vuelve a disparar al terminar el cooldown. | El reconocedor emite **flancos de subida** y exige bajar las manos antes de rearmar. El cooldown queda como segunda red. |
 | FAR ≈ 200 / MEDIUM ≈ 800 / CLOSE ≈ 3000 partículas fijas | Una persona lejana ya ocupa pocas celdas en pantalla. Números fijos obligan a redistribuir partículas de golpe. | La retícula da el conteo natural por tamaño aparente. `particleDensity` modula la fracción de celdas y `bodyParticleBudget` reparte un tope entre personas. |
 | Formación de 500–1200 ms | Alguien que camina a 1.4 m/s cruza el encuadre en 2–3 s. Si la silueta tarda un segundo en aparecer, ya se fue. | Formación escalonada: las primeras partículas llegan en ~300 ms y la silueta completa en ~900 ms. La confirmación de presencia es de 180 ms. |
 | "TE VEO" | Suena a vigilancia. | "TÚ ERES EL INPUT" (configurable, desactivable). |
-| `PoseTracker.ts` y `GestureRecognizer.ts` en el MVP | Archivos vacíos son deuda sin valor. | No se crearon. Existe el contrato `GestureEvents`, la reacción visual (`InteractionManager`) y la simulación con teclas en debug. |
+| `PoseTracker.ts` y `GestureRecognizer.ts` en el MVP | Archivos vacíos son deuda sin valor. | La iteración 2 añadió `GestureRecognizer` sólo al existir Pose real y casos de prueba para su comportamiento temporal. |
+
+**Hallazgo adicional de la iteración 2.** Una promesa tardía de `createImageBitmap()` podía terminar después de reiniciar el worker y poner `inFlight=false` sobre la nueva instancia. Eso abría la puerta a más de un frame en vuelo y a resultados fuera de orden. La captura ahora sólo modifica ese estado si todavía pertenece al worker que la inició.
 
 ## 3. MediaPipe en navegador
 
@@ -31,7 +33,7 @@ Es viable como aplicación 100 % web en Chromium, corriendo en una sola computad
 - `ImageSegmenter` + `selfie_segmenter` / `selfie_segmenter_landscape`: una máscara de confianza para todas las personas en un solo pase. **Elegido.**
 - `selfie_multiclass_256x256`: separa pelo, piel y ropa. Más costoso y no aporta a una silueta.
 - DeepLab v3: clases genéricas, más lento y con peores bordes en personas.
-- `PoseLandmarker` con `outputSegmentationMasks`: da una máscara **por persona** y landmarks en el mismo pase. Pero su detector es débil con multitudes, personas lejanas u oclusiones. Es el candidato para Fase 4.
+- `PoseLandmarker` se usa sólo para landmarks; sus máscaras por pose permanecen desactivadas. La silueta sigue viniendo del segmentador semántico, más robusto para este encuadre.
 - `InteractiveSegmenter`: requiere un punto de entrada. Descartado.
 
 **Hallazgos verificados durante la implementación:**
@@ -81,7 +83,7 @@ Es viable como aplicación 100 % web en Chromium, corriendo en una sola computad
 | Retardo del resorte de partículas | ~3–4 frames (50–70 ms) |
 | **Total** | **~100–150 ms**, más el panel |
 
-El panel de debug muestra la latencia real de captura a resultado.
+El panel de debug muestra la latencia interna captura → resultado. No la presenta como motion-to-photon, que debe medirse externamente.
 
 **Contra el parpadeo**, en orden de importancia:
 

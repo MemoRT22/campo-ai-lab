@@ -1,8 +1,9 @@
-import type { Config, Delegate } from '../config';
+import type { Config } from '../config';
 import { CameraManager } from './CameraManager';
 import { maskSettingsFrom } from './MaskProcessor';
 import type { FrameMessage, FromWorker, InitMessage } from './protocol';
 import { createVisionStatus, type VisionFrame, type VisionSource } from './types';
+import { WorkerRecoveryPolicy } from './WorkerRecoveryPolicy';
 
 /**
  * Cámara → ImageBitmap reducido → worker (segmentación + limpieza) → VisionFrame.
@@ -16,10 +17,9 @@ export class CameraVisionSource implements VisionSource {
   private readonly camera: CameraManager;
   private worker: Worker | null = null;
   private workerReady = false;
-  private workerFailures = 0;
   private workerRetryAt = 0;
   private workerSpawnedAt = 0;
-  private delegate: Delegate;
+  private readonly recovery: WorkerRecoveryPolicy;
   private inFlight = false;
   private sentAt = 0;
   private lastCaptureAt = 0;
@@ -35,15 +35,19 @@ export class CameraVisionSource implements VisionSource {
     timestamp: 0,
     inferenceMs: 0,
     processingMs: 0,
+    poses: [],
+    poseTimestamp: null,
+    poseInferenceMs: 0,
   };
 
   constructor(private readonly config: Config) {
-    this.delegate = config.vision.delegate;
+    this.recovery = new WorkerRecoveryPolicy(config.vision.delegate, config.vision.runtimeFailureThreshold, config.camera.retryDelaysMs);
     this.camera = new CameraManager(config.camera);
     this.camera.onStatusChange = () => {
       this.status.camera = this.camera.status;
       this.status.cameraDetail = this.camera.detail;
       this.status.cameras = this.camera.devices;
+      this.status.cameraFps = this.camera.measuredFps;
     };
   }
 
@@ -63,6 +67,7 @@ export class CameraVisionSource implements VisionSource {
     this.worker?.terminate();
     this.worker = null;
     this.workerReady = false;
+    this.status.worker = 'off';
   }
 
   update(now: number): void {
@@ -72,7 +77,7 @@ export class CameraVisionSource implements VisionSource {
       return;
     }
     if (!this.workerReady && now - this.workerSpawnedAt > this.config.vision.workerInitTimeoutMs) {
-      this.restartWorker('El segmentador no terminó de iniciar a tiempo', true);
+      this.restartWorker('El pipeline de visión no terminó de iniciar a tiempo', true);
       return;
     }
     if (this.inFlight) {
@@ -97,6 +102,7 @@ export class CameraVisionSource implements VisionSource {
     const height = Math.max(1, Math.round((width * video.videoHeight) / video.videoWidth));
     const worker = this.worker;
     this.inFlight = true;
+    this.status.worker = 'busy';
     this.sentAt = now;
     this.lastCaptureAt = now;
 
@@ -104,7 +110,7 @@ export class CameraVisionSource implements VisionSource {
       .then((bitmap) => {
         if (!worker || worker !== this.worker || !this.workerReady) {
           bitmap.close();
-          this.inFlight = false;
+          if (worker === this.worker) this.inFlight = false;
           return;
         }
         const recycled = this.recycled;
@@ -113,18 +119,19 @@ export class CameraVisionSource implements VisionSource {
         worker.postMessage(message, recycled ? [bitmap, recycled] : [bitmap]);
       })
       .catch((error: unknown) => {
-        this.inFlight = false;
+        if (worker === this.worker) this.inFlight = false;
         console.warn('[vision] No se pudo capturar el frame', error);
       });
   }
 
   private spawnWorker(): void {
     this.status.model = 'loading';
+    this.status.worker = 'starting';
     const worker = new Worker(new URL('./vision.worker.ts', import.meta.url), { type: 'module', name: 'campo-vision' });
     worker.addEventListener('message', this.handleMessage);
     worker.addEventListener('error', (event) => {
       event.preventDefault();
-      if (worker === this.worker) this.restartWorker(event.message || 'Error al cargar el worker de visión');
+      if (worker === this.worker) this.restartWorker(event.message || 'Error al cargar el worker de visión', !this.workerReady);
     });
     this.worker = worker;
     this.workerReady = false;
@@ -136,9 +143,12 @@ export class CameraVisionSource implements VisionSource {
     const init: InitMessage = {
       type: 'init',
       wasmBaseUrl: new URL(vision.wasmPath, base).href.replace(/\/$/, ''),
+      poseWasmBaseUrl: new URL(vision.poseWasmPath, base).href.replace(/\/$/, ''),
       modelUrl: new URL(vision.modelPath, base).href,
-      delegate: this.delegate,
+      poseModelUrl: new URL(vision.poseModelPath, base).href,
+      delegate: this.recovery.delegate,
       settings: maskSettingsFrom(this.config),
+      visionSettings: vision,
     };
     worker.postMessage(init);
   }
@@ -152,19 +162,15 @@ export class CameraVisionSource implements VisionSource {
     this.workerReady = false;
     this.inFlight = false;
     this.recycled = null;
+    this.hasPending = false;
+    this.lastFrameAt = 0;
 
-    const preferred = this.config.vision.delegate;
-    if (duringInit && this.delegate === 'GPU') {
-      // Sin GPU utilizable: reintentar de inmediato en CPU con un worker limpio.
-      this.delegate = 'CPU';
-      this.workerRetryAt = 0;
-      return;
-    }
-    // Tras un fallo en CPU se vuelve a probar el delegado preferido en el siguiente intento.
-    this.delegate = preferred;
-    this.workerFailures++;
-    const delays = this.config.camera.retryDelaysMs;
-    this.workerRetryAt = performance.now() + delays[Math.min(this.workerFailures - 1, delays.length - 1)];
+    const decision = this.recovery.failure(reason, duringInit);
+    this.workerRetryAt = performance.now() + decision.delayMs;
+    this.status.worker = decision.delayMs > 0 ? 'backoff' : 'off';
+    this.status.consecutiveFailures = this.recovery.consecutiveFailures;
+    this.status.fallbackReason = this.recovery.fallbackReason;
+    this.status.delegate = decision.delegate;
   }
 
   private handleMessage = (event: MessageEvent<FromWorker>): void => {
@@ -173,14 +179,17 @@ export class CameraVisionSource implements VisionSource {
     switch (message.type) {
       case 'ready':
         this.workerReady = true;
-        this.workerFailures = 0;
         this.status.model = 'ready';
         this.status.delegate = message.delegate;
+        this.status.worker = 'ready';
         this.status.labels = message.labels;
-        console.info(`[vision] Segmentador listo (${message.delegate}). Etiquetas: ${message.labels.join(', ') || '—'}`);
+        console.info(`[vision] Segmentación + Pose listas (${message.delegate}). Etiquetas: ${message.labels.join(', ') || '—'}`);
         break;
       case 'result': {
         this.inFlight = false;
+        this.recovery.success();
+        this.status.consecutiveFailures = 0;
+        this.status.worker = 'ready';
         const frame = this.frame;
         // El frame anterior ya fue consumido en un requestAnimationFrame previo: su buffer se reutiliza.
         if (frame.personMap.byteLength > 0) this.recycled = frame.personMap.buffer as ArrayBuffer;
@@ -191,21 +200,22 @@ export class CameraVisionSource implements VisionSource {
         frame.timestamp = message.timestamp;
         frame.inferenceMs = message.inferenceMs;
         frame.processingMs = message.processingMs;
+        frame.poses = message.poses;
+        frame.poseTimestamp = message.poseTimestamp;
+        frame.poseInferenceMs = message.poseInferenceMs;
         this.hasPending = true;
         this.lastFrameAt = performance.now();
         break;
       }
       case 'skipped':
         this.inFlight = false;
+        this.status.worker = 'ready';
         if (message.recycled) this.recycled = message.recycled;
         break;
       case 'error':
         this.status.lastError = message.message;
         if (message.fatal) this.restartWorker(message.message, message.duringInit);
-        else {
-          console.warn(`[vision] ${message.message}`);
-          this.inFlight = false;
-        }
+        else this.restartWorker(message.message, false);
         break;
     }
   };

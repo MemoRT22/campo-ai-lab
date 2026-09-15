@@ -1,9 +1,11 @@
 import type { Config } from '../config';
 import { InteractionManager } from '../interaction/InteractionManager';
+import { GestureRecognizer } from '../interaction/GestureRecognizer';
 import { ParticleSystem } from '../particles/ParticleSystem';
 import { TargetField } from '../particles/TargetField';
 import { Renderer } from '../render/Renderer';
 import { BrandOverlay } from '../ui/BrandOverlay';
+import { CalibrationPanel } from '../ui/CalibrationPanel';
 import { DebugPanel } from '../ui/DebugPanel';
 import { InstructionOverlay } from '../ui/InstructionOverlay';
 import { PrivacyNotice } from '../ui/PrivacyNotice';
@@ -28,6 +30,7 @@ export class App {
   private readonly particles: ParticleSystem;
   private readonly experience: Experience;
   private readonly interaction: InteractionManager;
+  private readonly gestures: GestureRecognizer;
   private readonly source: VisionSource;
   private readonly perf = new PerformanceMonitor();
   private readonly debug: DebugPanel | null = null;
@@ -50,6 +53,7 @@ export class App {
     const privacy = new PrivacyNotice(overlayRoot, config.privacy, config.texts.privacy);
     this.experience = new Experience(config, overlay, brand, privacy, now);
     this.interaction = new InteractionManager(config, this.particles, this.field, this.experience);
+    this.gestures = new GestureRecognizer(config.gestures);
     this.source = config.mockVision ? new MockVisionSource(config) : new CameraVisionSource(config);
 
     this.experience.onStateChange = (from, to) => {
@@ -65,9 +69,12 @@ export class App {
         particles: this.particles,
         experience: this.experience,
         interaction: this.interaction,
+        gestures: this.gestures,
+        field: this.field,
         errors: this.errors,
       });
     }
+    if (config.calibrationMode) new CalibrationPanel(overlayRoot, config);
   }
 
   start(): void {
@@ -102,11 +109,16 @@ export class App {
         this.field.update(frame, now);
         this.particles.applyTargets(this.field, now);
         this.perf.recordVision(frame.inferenceMs, frame.processingMs, frame.timestamp, now);
+        if (frame.poseTimestamp !== null) {
+          for (const event of this.gestures.update(frame.poses, frame.people, frame.poseTimestamp)) this.interaction.handle(event, now);
+          this.perf.recordPose(frame.poseInferenceMs);
+        }
         this.debug?.drawFrame(frame);
       } else if ((this.field.activeCount > 0 || this.field.peopleCount > 0) && now - this.source.lastFrameAt > this.config.vision.staleFrameMs) {
         // Visión detenida: no dejar una silueta congelada en pantalla.
         this.field.clear();
         this.particles.applyTargets(this.field, now);
+        this.gestures.reset();
       }
 
       this.experience.update(now, this.field.peopleCount);
@@ -131,8 +143,8 @@ export class App {
 
   private readonly handleDebugKey = (event: KeyboardEvent): void => {
     const now = performance.now();
-    if (event.key === '1') this.interaction.simulate('hand-raised', now);
-    else if (event.key === '2') this.interaction.simulate('both-hands-raised', now);
+    if (event.key === '1') this.interaction.simulate('ONE_HAND_UP', now);
+    else if (event.key === '2') this.interaction.simulate('BOTH_HANDS_UP', now);
     else if (event.key === 'd' || event.key === 'D') this.debug?.toggle();
   };
 

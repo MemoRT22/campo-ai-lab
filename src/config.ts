@@ -19,6 +19,8 @@ export interface NormalizedRect {
 export const defaultConfig = {
   /** Panel técnico: cámara, máscara, cajas, FPS. Nunca activar en producción. */
   debugMode: false,
+  /** Herramientas de ajuste en sitio. Implica debugMode y sólo persiste números técnicos. */
+  calibrationMode: false,
   /** Sustituye la cámara por siluetas sintéticas (desarrollo sin cámara ni personas). */
   mockVision: false,
 
@@ -43,11 +45,19 @@ export const defaultConfig = {
 
   vision: {
     processingFPS: 30,
+    /** Pose comparte el frame y el worker, pero corre con menor frecuencia. */
+    poseFPS: 15,
     /** Ancho del frame enviado al modelo. El segmentador trabaja internamente a 256×144. */
     inferenceWidth: 320,
     delegate: 'GPU' as Delegate,
     modelPath: 'models/selfie_segmenter_landscape.tflite',
+    poseModelPath: 'models/pose_landmarker_lite.task',
     wasmPath: 'mediapipe/wasm',
+    /** Segunda URL del mismo runtime: evita la caché ESM al alojar dos tareas en un worker. */
+    poseWasmPath: 'mediapipe/pose-wasm',
+    poseDetectionConfidence: 0.55,
+    posePresenceConfidence: 0.55,
+    poseTrackingConfidence: 0.55,
     /** Confianza mínima para considerar un píxel como persona. */
     maskThreshold: 0.6,
     /** Histéresis: un píxel encendido se apaga hasta bajar de threshold − hysteresis. */
@@ -68,6 +78,20 @@ export const defaultConfig = {
     workerTimeoutMs: 8000,
     /** Descargar el runtime y compilar shaders puede tardar en equipos lentos. */
     workerInitTimeoutMs: 45000,
+    /** Fallos/timeout consecutivos antes de fijar CPU para el resto de la sesión. */
+    runtimeFailureThreshold: 3,
+  },
+
+  gestures: {
+    minVisibility: 0.6,
+    /** Distancia normalizada por encima del hombro para activar y para rearmar. */
+    raiseMargin: 0.075,
+    lowerMargin: 0.025,
+    smoothingMs: 90,
+    oneHandHoldMs: 220,
+    bothHandsHoldMs: 300,
+    /** Una ausencia breve de pose no rearma un gesto sostenido. */
+    absenceGraceMs: 300,
   },
 
   proximity: {
@@ -134,7 +158,7 @@ export const defaultConfig = {
     secondInstructionDelayMs: 1600,
     revealDurationMs: 4200,
     revealScatterMs: 1300,
-    gestureCooldown: 4000,
+    gestureCooldown: 350,
     absenceGraceMs: 900,
     /** Si la persona regresa antes de este tiempo, se retoma la secuencia sin repetir el saludo. */
     returnWithinMs: 8000,
@@ -150,7 +174,7 @@ export const defaultConfig = {
     idlePrompt: 'ACÉRCATE',
     detected: 'TÚ ERES EL INPUT',
     raiseHand: 'LEVANTA UNA MANO',
-    tryBoth: 'PRUEBA CON LAS DOS',
+    tryBoth: 'AHORA PRUEBA CON LAS DOS',
     revealTitle: 'COMPUTER VISION',
     revealSubtitle: 'SEGMENTACIÓN HUMANA EN TIEMPO REAL',
     privacy: 'Procesamiento local en tiempo real · No almacenamos imágenes',

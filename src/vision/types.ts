@@ -23,6 +23,18 @@ export interface PersonInfo {
   confirmed: boolean;
 }
 
+export interface PoseLandmark {
+  x: number;
+  y: number;
+  z: number;
+  visibility: number;
+}
+
+/** Landmarks transitorios de una pose; nunca se persisten ni salen de la máquina. */
+export interface PoseInfo {
+  landmarks: PoseLandmark[];
+}
+
 export interface VisionFrame {
   width: number;
   height: number;
@@ -33,6 +45,10 @@ export interface VisionFrame {
   timestamp: number;
   inferenceMs: number;
   processingMs: number;
+  poses: PoseInfo[];
+  /** null cuando este resultado sólo ejecutó segmentación. */
+  poseTimestamp: number | null;
+  poseInferenceMs: number;
 }
 
 export type CameraStatus =
@@ -47,6 +63,7 @@ export type CameraStatus =
   | 'error';
 
 export type ModelStatus = 'off' | 'loading' | 'ready' | 'error';
+export type WorkerStatus = 'off' | 'starting' | 'ready' | 'busy' | 'backoff';
 
 export interface VisionStatus {
   camera: CameraStatus;
@@ -56,6 +73,10 @@ export interface VisionStatus {
   delegate: Delegate | null;
   labels: string[];
   lastError: string;
+  worker: WorkerStatus;
+  consecutiveFailures: number;
+  fallbackReason: string;
+  cameraFps: number;
 }
 
 export interface VisionSource {
@@ -79,5 +100,9 @@ export function createVisionStatus(): VisionStatus {
     delegate: null,
     labels: [],
     lastError: '',
+    worker: 'off',
+    consecutiveFailures: 0,
+    fallbackReason: '',
+    cameraFps: 0,
   };
 }

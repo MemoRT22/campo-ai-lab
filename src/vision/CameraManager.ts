@@ -34,6 +34,7 @@ export class CameraManager {
   status: CameraStatus = 'idle';
   detail = '';
   devices: string[] = [];
+  measuredFps = 0;
   onStatusChange: (() => void) | null = null;
 
   private stream: MediaStream | null = null;
@@ -43,6 +44,8 @@ export class CameraManager {
   private stopped = true;
   private lastVideoTime = -1;
   private lastAdvanceAt = 0;
+  private fpsWindowAt = 0;
+  private fpsFrames = 0;
 
   constructor(private readonly settings: CameraSettings) {
     const video = document.createElement('video');
@@ -77,6 +80,15 @@ export class CameraManager {
     if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 && time !== this.lastVideoTime) {
       this.lastVideoTime = time;
       this.lastAdvanceAt = now;
+      this.fpsFrames++;
+      if (this.fpsWindowAt === 0) this.fpsWindowAt = now;
+      const elapsed = now - this.fpsWindowAt;
+      if (elapsed >= 1000) {
+        this.measuredFps = (this.fpsFrames * 1000) / elapsed;
+        this.fpsFrames = 0;
+        this.fpsWindowAt = now;
+        this.onStatusChange?.();
+      }
       return true;
     }
     if (now - this.lastAdvanceAt > this.settings.frozenFrameTimeoutMs) {
@@ -113,6 +125,8 @@ export class CameraManager {
       this.retryAttempt = 0;
       this.lastVideoTime = -1;
       this.lastAdvanceAt = performance.now();
+      this.fpsWindowAt = 0;
+      this.fpsFrames = 0;
 
       const track = stream.getVideoTracks()[0];
       const s = track.getSettings();
@@ -170,6 +184,7 @@ export class CameraManager {
     }
     this.stream = null;
     this.video.srcObject = null;
+    this.measuredFps = 0;
   }
 
   private handleTrackEnded = (): void => {

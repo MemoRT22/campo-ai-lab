@@ -306,3 +306,73 @@ body.cursor-hidden * {
 .debug__help {
   color: #8a8a8a;
 }
+
+/* ── Calibración en sitio (?calibrate=true) ───────────────── */
+
+.calibration {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 300px;
+  max-height: calc(100vh - 24px);
+  box-sizing: border-box;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid rgb(255 255 255 / 0.16);
+  background: rgb(0 0 0 / 0.82);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  pointer-events: auto;
+}
+
+.calibration h2 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  letter-spacing: 0.18em;
+}
+
+.calibration p {
+  margin: 0 0 12px;
+  color: #929292;
+  line-height: 1.45;
+}
+
+.calibration__form {
+  display: grid;
+  grid-template-columns: 1fr 84px;
+  gap: 6px 10px;
+}
+
+.calibration label {
+  display: contents;
+}
+
+.calibration label span {
+  align-self: center;
+}
+
+.calibration input,
+.calibration button {
+  box-sizing: border-box;
+  border: 1px solid rgb(255 255 255 / 0.18);
+  background: #111;
+  color: #eee;
+  font: inherit;
+}
+
+.calibration input {
+  width: 84px;
+  padding: 4px 5px;
+}
+
+.calibration button {
+  width: 100%;
+  margin-top: 12px;
+  padding: 8px;
+  cursor: pointer;
+}
+
+.calibration button.is-secondary {
+  margin-top: 6px;
+  color: #999;
+}

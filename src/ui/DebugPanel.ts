@@ -1,7 +1,9 @@
 import type { Config } from '../config';
 import type { Experience } from '../core/Experience';
 import type { InteractionManager } from '../interaction/InteractionManager';
+import type { GestureRecognizer } from '../interaction/GestureRecognizer';
 import type { ParticleSystem } from '../particles/ParticleSystem';
+import type { TargetField } from '../particles/TargetField';
 import type { PerformanceMonitor } from '../utils/PerformanceMonitor';
 import type { VisionFrame, VisionSource } from '../vision/types';
 
@@ -17,6 +19,11 @@ const SLOT_TONES = [
   [220, 180, 160],
 ];
 
+const POSE_CONNECTIONS = [
+  [11, 12], [11, 13], [13, 15], [12, 14], [14, 16], [11, 23], [12, 24], [23, 24],
+  [23, 25], [25, 27], [24, 26], [26, 28], [15, 17], [15, 19], [16, 18], [16, 20],
+] as const;
+
 export interface DebugContext {
   config: Config;
   source: VisionSource;
@@ -24,6 +31,8 @@ export interface DebugContext {
   particles: ParticleSystem;
   experience: Experience;
   interaction: InteractionManager;
+  gestures: GestureRecognizer;
+  field: TargetField;
   errors: string[];
 }
 
@@ -45,6 +54,7 @@ export class DebugPanel {
   private imageData: ImageData | null = null;
   private lastTextAt = 0;
   private videoAttached = false;
+  private latestPoses: VisionFrame['poses'] = [];
 
   constructor(root: HTMLElement, private readonly ctx: DebugContext) {
     this.el = document.createElement('aside');
@@ -92,6 +102,12 @@ export class DebugPanel {
     }
     const g = this.maskCtx;
     g.putImageData(this.imageData, 0, 0);
+    const crop = this.ctx.config.camera.crop;
+    const cropLeft = (mirror ? 1 - crop.x - crop.width : crop.x) * width;
+    g.strokeStyle = '#ffd60a';
+    g.setLineDash([4, 3]);
+    g.strokeRect(cropLeft + 0.5, crop.y * height + 0.5, crop.width * width, crop.height * height);
+    g.setLineDash([]);
     g.lineWidth = 1;
     g.font = '9px ui-monospace, monospace';
     for (const person of people) {
@@ -104,24 +120,48 @@ export class DebugPanel {
       g.fillStyle = '#ff3b30';
       g.fillText(`#${person.id} ${proximityLabel(person.proximity)} ${person.proximity.toFixed(2)}`, left + 2, Math.max(9, top - 2));
     }
+    if (frame.poseTimestamp !== null) this.latestPoses = frame.poses;
+    for (const pose of this.latestPoses) {
+      g.strokeStyle = '#64d2ff';
+      g.fillStyle = '#64d2ff';
+      for (const [a, b] of POSE_CONNECTIONS) {
+        const from = pose.landmarks[a];
+        const to = pose.landmarks[b];
+        if (!from || !to || from.visibility < 0.35 || to.visibility < 0.35) continue;
+        g.beginPath();
+        g.moveTo((mirror ? 1 - from.x : from.x) * width, from.y * height);
+        g.lineTo((mirror ? 1 - to.x : to.x) * width, to.y * height);
+        g.stroke();
+      }
+      for (const point of pose.landmarks) {
+        if (point.visibility < 0.35) continue;
+        g.beginPath();
+        g.arc((mirror ? 1 - point.x : point.x) * width, point.y * height, 1.4, 0, Math.PI * 2);
+        g.fill();
+      }
+    }
   }
 
   update(now: number): void {
     if (this.el.hidden || now - this.lastTextAt < TEXT_INTERVAL_MS) return;
     this.lastTextAt = now;
     this.attachVideo();
-    const { perf, particles, source, experience, interaction, errors } = this.ctx;
+    const { perf, particles, source, experience, interaction, gestures, field, errors } = this.ctx;
     const status = source.status;
     const gesture = interaction.lastGesture;
     const lines = [
       `render      ${perf.renderFps.toFixed(0)} fps · js ${perf.frameMs.toFixed(2)} ms`,
-      `vision      ${perf.visionFps.toFixed(0)} fps · inferencia ${perf.inferenceMs.toFixed(1)} ms · máscara ${perf.maskProcessingMs.toFixed(1)} ms`,
-      `latencia    ${perf.visionLatencyMs.toFixed(0)} ms (captura → resultado)`,
+      `cámara      ${status.cameraFps.toFixed(1)} fps · ${status.camera}${status.cameraDetail ? ` · ${status.cameraDetail}` : ''}`,
+      `segmentación ${perf.segmentationFps.toFixed(1)} fps · ${perf.inferenceMs.toFixed(1)} ms`,
+      `pose        ${perf.poseFps.toFixed(1)} fps · ${perf.poseInferenceMs.toFixed(1)} ms`,
+      `máscara     ${perf.maskProcessingMs.toFixed(1)} ms`,
+      `pipeline    ${perf.visionLatencyMs.toFixed(0)} ms (captura → resultado; no motion-to-photon)`,
       `partículas  ${particles.renderCount} visibles · ${particles.bodyCount} cuerpo · ${particles.ambientCount} ambiente · ${particles.dormantCount} pool`,
+      `personas    ${field.peopleCount}`,
       `estado      ${experience.state.toUpperCase()}`,
-      `cámara      ${status.camera}${status.cameraDetail ? ` · ${status.cameraDetail}` : ''}`,
       `modelo      ${status.model}${status.delegate ? ` · ${status.delegate}` : ''}${status.labels.length ? ` · [${status.labels.join(', ')}]` : ''}`,
-      `gesto       ${gesture ? `${gesture.type} (${gesture.source}) hace ${((now - gesture.timestamp) / 1000).toFixed(1)} s` : '—'}`,
+      `worker      ${status.worker} · fallos ${status.consecutiveFailures}${status.fallbackReason ? ` · fallback: ${summarize(status.fallbackReason)}` : ''}`,
+      `gesto       ${gestures.currentGesture}${gesture ? ` · último ${gesture.type} ${Math.round(gesture.confidence * 100)}% hace ${((now - gesture.timestamp) / 1000).toFixed(1)} s` : ''}`,
     ];
     if (status.cameras.length) lines.push(`cámaras     ${status.cameras.join(' | ')}`);
     if (status.lastError) lines.push(`error       ${summarize(status.lastError)}`);
