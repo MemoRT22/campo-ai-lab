@@ -80,8 +80,8 @@ Es viable como aplicación 100 % web en Chromium, corriendo en una sola computad
 | --- | --- |
 | Captura de webcam | 30–70 ms |
 | Captura + inferencia + limpieza | ~10 ms |
-| Retardo del resorte de partículas | ~3–4 frames (50–70 ms) |
-| **Total** | **~100–150 ms**, más el panel |
+| Retardo de las partículas de un cuerpo formado | ~1 frame (~13 ms); antes del ajuste de fases eran ~52 ms |
+| **Total** | **~60–100 ms**, más el panel; `predictionMs` compensa ~30 ms de traslaciones estables |
 
 El panel de debug muestra la latencia interna captura → resultado. No la presenta como motion-to-photon, que debe medirse externamente.
 
@@ -89,8 +89,8 @@ El panel de debug muestra la latencia interna captura → resultado. No la prese
 
 1. Umbral con **histéresis**: un píxel encendido se apaga hasta bajar de `threshold − hysteresis`.
 2. Suavizado temporal **asimétrico**: aparecer en 35 ms, desaparecer en 140 ms.
-3. Retícula estable en pantalla.
-4. Resortes amortiguados con velocidad máxima.
+3. Retícula estable en pantalla; al caminar, la silueta completa se traslada de celda en lugar de mandar partículas de borde a borde.
+4. Seguimiento de primer orden (`trackingSnap`) con interpolación entre frames de visión: poco lag sin avanzar a escalones de 30 Hz ni pasarse al detenerse.
 
 ## 7. Rendimiento
 
@@ -103,6 +103,7 @@ El panel de debug muestra la latencia interna captura → resultado. No la prese
 | Inferencia (worker) | 5.5–7 ms |
 | Limpieza de máscara | 0.5–0.7 ms |
 | Simulación de partículas (Node, ~3100 de cuerpo a 1080p) | 0.2 ms p50, 0.7 ms p99 |
+| Peor caso: 5670 de cuerpo caminando + onda + reveal + vuelo al texto (1080p) | simulación 2.4 ms p50 / 3.0 ms p95; reasignación 0.25 ms |
 
 **Prueba de estabilidad.** Se simularon 30 minutos del pipeline real sin render (máscara → retícula → partículas) con personas entrando y saliendo, ruido y caídas del segmentador. Se verificaron invariantes en cada frame de visión: cada partícula de cuerpo es dueña de su celda, el pool no se corrompe, no hay NaN, y al vaciarse la escena vuelve exactamente a 900 partículas ambientales. No se observó crecimiento de memoria.
 
@@ -126,7 +127,7 @@ El panel de debug muestra la latencia interna captura → resultado. No la prese
   1. Que la silueta sea **reconocible desde lejos**. Por eso se reforzaron los valores FAR y el contorno.
   2. Que el **espejo coincida con la posición de la persona**. La cámara debe quedar centrada horizontalmente respecto a la pantalla (arriba o abajo); si está desplazada, la silueta aparece corrida y se rompe la sensación de reflejo.
 - **Tamaño del texto.** Regla práctica: ~2.5 cm de altura de letra por cada 3 m de distancia. En una pantalla de 55" a 1080p, leer a 4 m requiere ~50 px de altura de mayúscula. Los tamaños actuales están pensados para probar en laptop: **en sitio subir `typography.scale` a ~2–2.5.**
-- **Texto sobre la silueta.** Se usa un halo oscuro difuso en lugar de cajas, para mantener la estética sin sacrificar lectura.
+- **Texto y silueta.** El texto con personas presentes se coloca en el espacio negativo lateral o superior, según cuánto ocupan las siluetas. Las instrucciones de manos nunca van arriba. El halo oscuro difuso queda sólo como respaldo.
 - **Privacidad.** El aviso en pantalla no sustituye un aviso físico junto al ventanal. Aunque no se almacene nada, conviene validar con el área jurídica de la universidad si aplica un aviso de privacidad simplificado conforme a la LFPDPPP.
 
 ## 10. Mantenibilidad

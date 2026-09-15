@@ -27,6 +27,7 @@ export const CALIBRATION_PATHS = new Set([
   'vision.poseDetectionConfidence',
   'camera.crop',
   'typography.scale',
+  'layout.sideColumnWidth',
   'particles.particleSpacing',
   'particles.trackingResponseMs',
   'particles.trackingAttraction',

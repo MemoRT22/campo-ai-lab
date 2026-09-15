@@ -73,7 +73,8 @@ Todo vive en [`src/config.ts`](src/config.ts). No hay números mágicos repartid
 | `vision` | FPS independientes de segmentación/Pose, ancho, delegado GPU/CPU, umbrales, suavizado, área mínima, `maxPeople`, watchdog y fallback |
 | `gestures` | Visibilidad, margen, suavizado, histéresis, tiempos mínimos y gracia de ausencia |
 | `proximity` | Qué tamaño aparente cuenta como lejos o cerca |
-| `particles` | Pool, densidad, formación, tracking, predicción, transporte, ambiente, departure y reacciones gestuales |
+| `particles` | Pool y densidad; fases de movimiento (formación, tracking, movimiento rápido, departure); predicción e interpolación; presencia magnética; idle; onda de mano; reveal y vuelo de partículas al texto y a la marca |
+| `layout` | Columnas de espacio negativo para el texto, franja superior, umbral de ocupación e histéresis |
 | `experience` | Tiempos de la narrativa: saludo, instrucciones, `instructionTimeout`, `gestureCooldown`, gracia de ausencia, marca |
 | `texts` | Todos los textos en pantalla |
 | `branding` | `showBranding`, `brandName`, `labName`, `tagline`, `logoEnabled`, `logoPath` |
@@ -97,32 +98,47 @@ Todo vive en [`src/config.ts`](src/config.ts). No hay números mágicos repartid
 3. Ajustar `maskThreshold`, `minPersonArea` y `crop` hasta que reflejos y sombras dejen de aparecer.
 4. Subir `typography.scale` hasta que el texto se lea a la distancia real.
 
-### Ajustes finales de mirror feel
+### Mirror feel: fases de movimiento
 
-Los valores de partida de esta iteración separan deliberadamente formación y seguimiento:
+Cada partícula del cuerpo usa tiempos distintos según su fase. El panel `?debug=true` muestra cuántas hay en cada una.
 
-| Parámetro | Valor | Función |
-| --- | ---: | --- |
-| `vision.smoothingAttackMs` | 22 ms | Adquisición rápida de nuevas zonas del cuerpo |
-| `vision.smoothingReleaseMs` | 65 ms | Evita la cola de máscara sin hacer vibrar el contorno |
-| `particles.formationDuration` | 780 ms | Entrada inicial cinematográfica |
-| `particles.trackingResponseMs` | 100 ms | Ventana del resorte rápido BODY → BODY |
-| `particles.trackingAttraction` | 0.45 | Recuperación rápida del target |
-| `particles.trackingDamping` | 0.38 | Frena overshoot al llegar |
-| `particles.maxSpeed` | 56 | Permite que extremidades alcancen targets lejanos |
-| `particles.predictionMs` | 36 ms | Compensa una parte de la latencia de visión |
-| `particles.predictionMaxDistance` | 26 px | Límite duro contra overshoot |
-| `particles.occlusionGraceMs` | 120 ms | Ignora una omisión aislada de segmentación |
+| Fase | Cuándo | Parámetros principales | Carácter |
+| --- | --- | --- | --- |
+| **INITIAL FORMATION** | La persona acaba de llegar | `particleAttraction` 0.16, `particleDamping` 0.6, `formationDuration` 780 ms, `formationMaxSpeed` 26 | Lenta y cinematográfica: el campo es atraído y se concentra en el cuerpo |
+| **NORMAL TRACKING** | Cuerpo formado (`bond` > `trackingBondThreshold`) | `trackingAttraction` 0.5, `trackingDamping` 0.42, `trackingSnap` 0.32, `maxSpeed` 64 | Espejo: resorte firme + acercamiento directo sin overshoot |
+| **FAST MOTION** | Track rápido (`fastMotionSpeed` 90→700 px/s) o transporte reciente (`trackingResponseMs` 120 ms) | `fastMotionAttraction` 0.7, `fastMotionDamping` 0.34, `fastMotionSnap` 0.5, estela `fastMotionTrailRatio` 12 % | Centro pegado al cuerpo con una estela muy leve |
+| **DEPARTURE** | El track desapareció | `occlusionGraceMs` 120, `departureLetGoMs` 70, `departureStaggerMs` 480, `dispersionDuration` 1750 | Momentum → desprendimiento escalonado → dispersión → campo |
 
-La predicción sólo se activa después de tres muestras estables. Se cancela ante saltos o cambios bruscos de dirección y puede desactivarse con `?particles.predictionMs=0`. El panel `?debug=true` muestra velocidad, adelanto aplicado, distancia media al target y lag estimado.
+**Caminar.** Cuando la silueta se traslada, toda la propiedad de celdas se desplaza a la vez: cada partícula recorre sólo el movimiento real del cuerpo, en lugar de cruzar del borde trasero al delantero. La traslación se mide con los bordes de la silueta, así que levantar o extender un brazo no la dispara. Medido a 540 px/s: lag medio de 24.6 px → 5.0 px y peor partícula de 101 px → 5 px, sin overshoot al detenerse.
 
-Para afinar con la cámara real, usar `?calibrate=true` y probar caminar, detenerse y cambiar de dirección:
+**Predicción e interpolación.** Ambas usan la velocidad de traslación rígida, sólo con tracks estables (`predictionStableFrames`) y con tope `predictionMaxDistance`.
+- `predictionMs` (30 ms) adelanta el target; se atenúa al girar (`predictionTurnCosine`), se corta proporcionalmente al frenar (`predictionBrakeRatio`) y se apaga al invertir la dirección. Crece suave (`predictionRiseMs`) y se reduce de inmediato. En vertical pesa `predictionVerticalFactor` (0.35).
+- `interpolationMaxMs` (40 ms) avanza el target entre frames de visión, para que el cuerpo no avance a escalones de 30 Hz.
+- `?particles.predictionMs=0&particles.interpolationMaxMs=0` desactiva ambas.
 
-1. Si todo el cuerpo queda atrás pero no vibra, probar `trackingResponseMs` entre 80–100 ms.
-2. Si se adelanta al detenerse, bajar `predictionMs` a 20–28 ms o ponerlo en `0`.
-3. Si el contorno deja una estela, bajar `smoothingReleaseMs` hacia 50–60 ms; si parpadea, subirlo hacia 75–90 ms.
-4. Si las manos tardan en completar un movimiento grande, subir gradualmente `maxSpeed`; si rebotan, bajar `trackingDamping` ligeramente (un valor menor amortigua más).
-5. Verificar motion-to-photon con video externo; `pipeline` mide captura → resultado y no incluye pantalla/cámara físicas.
+**Afinar con la cámara real** (`?calibrate=true`: caminar, detenerse, cambiar de dirección, mover brazos):
+
+1. Si el cuerpo queda atrás pero estable, subir `trackingSnap` hacia 0.4; si tiembla, bajarlo hacia 0.25.
+2. Si se adelanta al detenerse, bajar `predictionMs` a 15–20 o ponerlo en `0`.
+3. Si al caminar avanza a saltos, subir `interpolationMaxMs` hacia 50; si se adelanta, bajarlo.
+4. Si el contorno deja una estela, bajar `vision.smoothingReleaseMs` hacia 50–60 ms; si parpadea, subirlo hacia 75–90 ms.
+5. Si los brazos rápidos se quedan atrás, subir `fastMotionSnap` o `trackingResponseMs`.
+6. Verificar motion-to-photon con video externo: `pipeline` mide captura → resultado y no incluye pantalla ni cámara físicas.
+
+### Texto en el espacio negativo
+
+Con personas presentes, el texto nunca va abajo ni encima del cuerpo. Al aparecer cada mensaje, `NegativeSpaceLayout` mide cuánto ocupan las siluetas las columnas laterales (`layout.sideColumnWidth`) y una franja superior, y elige el espacio libre con histéresis (`layout.switchMargin`). Un texto visible nunca cambia de lugar.
+
+- Las instrucciones que piden levantar las manos nunca van arriba, porque ahí van a estar las manos.
+- Saludo, título y marca pueden subir a la franja superior si ambas columnas están ocupadas.
+- Sin personas (ACÉRCATE, marca de salida) el texto va al centro.
+
+### Gestos, reveal y marca
+
+- **ONE_HAND_UP:** onda orgánica acotada a `waveMaxRadius` alrededor de la mano detectada, con brillo leve (`waveGlow`). Se ancla a la persona y la acompaña si camina.
+- **BOTH_HANDS_UP:** expansión (`revealExpandMs`) → suspensión (`revealSuspendMs`) → un `textParticleRatio` (20 %) del cuerpo viaja al título → **COMPUTER VISION** → regreso. Esas partículas conservan su celda, así que el tracking nunca se detiene.
+- **Marca:** al terminar el reveal, las mismas partículas pasan del título a **ANÁHUAC CANCÚN** (`brandTravelMs`) y después vuelven al cuerpo.
+- **Legibilidad:** sólo los textos grandes reciben partículas, más tenues y pequeñas (`textParticleAlpha`, `textParticleSize`). El DOM y el muestreo comparten tipografía y cortes de línea, así que las partículas caen sobre las letras reales.
 
 ## Pantalla completa y modo kiosko
 
@@ -243,9 +259,9 @@ src/
 
 | Estado | Pantalla |
 | --- | --- |
-| **IDLE** | Campo de partículas lento y orgánico. "ACÉRCATE". Aviso de privacidad periódico. |
-| **PRESENCE** | Las partículas forman la silueta. "TÚ ERES EL INPUT" → "LEVANTA UNA MANO" → "AHORA PRUEBA CON LAS DOS" → "COMPUTER VISION". Después queda en modo libre y aparece la marca. |
-| **DEPARTURE** | La silueta conserva el momentum, se fragmenta y se dispersa. Si hubo interacción, aparece la marca. Luego vuelve a IDLE. |
+| **IDLE** | Campo lento con profundidad (cada partícula tiene tamaño, brillo y deriva según su profundidad). "ACÉRCATE" aparece y se desvanece cada `idlePromptIntervalMs`. Aviso de privacidad periódico. |
+| **PRESENCE** | El campo es atraído y forma la silueta. "TÚ ERES EL INPUT" → "LEVANTA UNA MANO" → "AHORA PRUEBA CON LAS DOS" → "COMPUTER VISION" → marca. Después, modo libre: sin instrucciones y con los gestos activos. El campo cercano reacciona muy sutilmente al movimiento. |
+| **DEPARTURE** | Momentum → desprendimiento escalonado → dispersión → campo ambiental. Si hubo interacción, aparece la marca al centro. Luego vuelve a IDLE. |
 
 Pérdidas breves de detección (menos de 900 ms) no cuentan como salida. Si la persona regresa en menos de 8 s, la secuencia continúa sin repetir el saludo.
 
@@ -269,7 +285,7 @@ Pérdidas breves de detección (menos de 900 ms) no cuentan como salida. Si la p
 
 ## Verificación
 
-`npm test`, `npm run typecheck` y `npm run build` validan lógica pura, contratos TypeScript y bundle de producción. La medición motion-to-photon sigue siendo una prueba física externa con video de alta velocidad.
+`npm test` (27 pruebas), `npm run typecheck` y `npm run build` validan lógica pura, contratos TypeScript y bundle de producción. Las pruebas cubren, entre otras cosas, la traslación de la silueta al caminar sin overshoot, la predicción ante brazos/frenado/giro, el departure escalonado, el reveal sin pérdida de tracking y la elección de espacio negativo. La medición motion-to-photon sigue siendo una prueba física externa con video de alta velocidad.
 
 ## Créditos y licencias
 

@@ -36,6 +36,7 @@ export class CalibrationPanel {
       { path: 'camera.crop.width', label: 'ROI width', value: config.camera.crop.width, min: 0.01, max: 1, step: 0.01 },
       { path: 'camera.crop.height', label: 'ROI height', value: config.camera.crop.height, min: 0.01, max: 1, step: 0.01 },
       { path: 'typography.scale', label: 'Typography scale', value: config.typography.scale, min: 0.25, max: 5, step: 0.05 },
+      { path: 'layout.sideColumnWidth', label: 'Text column width', value: config.layout.sideColumnWidth, min: 0.1, max: 0.45, step: 0.01 },
       { path: 'particles.particleSpacing', label: 'Particle spacing', value: config.particles.particleSpacing, min: 2, max: 80, step: 0.5 },
       { path: 'particles.trackingResponseMs', label: 'Tracking response ms', value: config.particles.trackingResponseMs, min: 60, max: 240, step: 5 },
       { path: 'particles.trackingAttraction', label: 'Tracking attraction', value: config.particles.trackingAttraction, min: 0.1, max: 1, step: 0.01 },
