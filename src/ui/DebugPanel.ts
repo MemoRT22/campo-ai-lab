@@ -157,6 +157,7 @@ export class DebugPanel {
       `máscara     ${perf.maskProcessingMs.toFixed(1)} ms`,
       `pipeline    ${perf.visionLatencyMs.toFixed(0)} ms (captura → resultado; no motion-to-photon)`,
       `partículas  ${particles.renderCount} visibles · ${particles.bodyCount} cuerpo · ${particles.ambientCount} ambiente · ${particles.dormantCount} pool`,
+      `transporte  ${particles.transportedLastFrame} reasignadas · ${particles.formedLastFrame} nuevas · ${particles.releasedLastFrame} liberadas`,
       `personas    ${field.peopleCount}`,
       `estado      ${experience.state.toUpperCase()}`,
       `modelo      ${status.model}${status.delegate ? ` · ${status.delegate}` : ''}${status.labels.length ? ` · [${status.labels.join(', ')}]` : ''}`,

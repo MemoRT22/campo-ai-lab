@@ -120,6 +120,12 @@ export const defaultConfig = {
     particleNoise: 1.3,
     particleAttraction: 0.14,
     particleDamping: 0.64,
+    /** Resorte temporal para mover una partícula ya formada hacia su nuevo target. */
+    trackingAttraction: 0.32,
+    trackingDamping: 0.68,
+    trackingResponseMs: 140,
+    /** Distancia máxima de transporte intra-persona, en px de referencia. */
+    trackingSearchRadius: 360,
     maxSpeed: 40,
     formationDuration: 850,
     /** Retraso aleatorio de formación (fracción de formationDuration). */

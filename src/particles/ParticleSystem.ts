@@ -50,6 +50,10 @@ export class ParticleSystem {
   renderCount = 0;
   bodyCount = 0;
   ambientCount = 0;
+  /** Diagnóstico del último frame de visión. */
+  transportedLastFrame = 0;
+  formedLastFrame = 0;
+  releasedLastFrame = 0;
 
   private readonly px: Float32Array;
   private readonly py: Float32Array;
@@ -67,9 +71,15 @@ export class ParticleSystem {
   private readonly proximity: Float32Array;
   private readonly excite: Float32Array;
   private readonly releasedAt: Float64Array;
+  /** Track temporal al que pertenece una partícula BODY; -1 fuera del cuerpo. */
+  private readonly particlePersonId: Int32Array;
+  /** Inicio del resorte rápido tras un transporte BODY → BODY. */
+  private readonly retargetedAt: Float64Array;
   private readonly cell: Int32Array;
   private readonly mode: Uint8Array;
   private readonly dormantStack: Int32Array;
+  private readonly transportCandidates: Int32Array;
+  private readonly missingByPerson = new Int32Array(8);
   private dormantTop = 0;
 
   private field: TargetField | null = null;
@@ -120,9 +130,12 @@ export class ParticleSystem {
     this.proximity = new Float32Array(n);
     this.excite = new Float32Array(n);
     this.releasedAt = new Float64Array(n);
+    this.particlePersonId = new Int32Array(n).fill(-1);
+    this.retargetedAt = new Float64Array(n).fill(-Infinity);
     this.cell = new Int32Array(n).fill(-1);
     this.mode = new Uint8Array(n);
     this.dormantStack = new Int32Array(n);
+    this.transportCandidates = new Int32Array(n);
     this.binItems = new Int32Array(n);
 
     const jitter = settings.cellJitter * 0.5;
@@ -158,22 +171,70 @@ export class ParticleSystem {
     this.binCursor = new Int32Array(this.binCols * this.binRows);
   }
 
-  /** Aplica un nuevo estado de siluetas: libera celdas apagadas y asigna partículas a celdas nuevas. */
+  /**
+   * Aplica un nuevo estado de siluetas.
+   *
+   * Primero conserva propietarios válidos y transporta BODY → BODY dentro del mismo track.
+   * Sólo después usa el pool ambiental para formación y libera candidatos sin destino.
+   */
   applyTargets(field: TargetField, now: number): void {
     this.field = field;
     if (field.version !== this.fieldVersion) this.rebuildOwnership(field, now);
 
+    this.transportedLastFrame = 0;
+    this.formedLastFrame = 0;
+    this.releasedLastFrame = 0;
+
     if (field.peopleCount > 0 && this.presenceSince < 0) this.presenceSince = now;
     else if (field.peopleCount === 0) this.presenceSince = -1;
 
-    const { mode, cell, life, cellOwner, capacity } = this;
-    const active = field.active;
+    const { mode, cell, life, cellOwner, capacity, particlePersonId, transportCandidates } = this;
+    const { active, cellPersonId } = field;
+    let candidateCount = 0;
 
+    // Una celda sólo se conserva si sigue activa para el mismo track temporal. Los demás
+    // BODY permanecen intactos mientras buscamos destino: todavía no son ambiente.
     for (let p = 0; p < capacity; p++) {
-      if (mode[p] === BODY && active[cell[p]] === 0) this.release(p, now);
+      if (mode[p] !== BODY) continue;
+      const c = cell[p];
+      if (c >= 0 && active[c] === 1 && cellPersonId[c] === particlePersonId[p]) continue;
+      if (c >= 0) cellOwner[c] = -1;
+      transportCandidates[candidateCount++] = p;
     }
 
-    // Índice espacial de partículas libres (counting sort por bins).
+    const missingByPerson = this.missingByPerson;
+    missingByPerson.fill(0);
+    const { activeList, activeCount, cellX, cellY } = field;
+    for (let k = 0; k < activeCount; k++) {
+      const c = activeList[k];
+      if (cellOwner[c] >= 0) continue;
+      const personIndex = field.personIndex(cellPersonId[c]);
+      if (personIndex >= 0) missingByPerson[personIndex]++;
+    }
+
+    // Transporte intra-persona. Sólo cambia el target: posición, velocidad, bond, life,
+    // glow y momentum permanecen exactamente como estaban.
+    for (let i = 0; i < candidateCount; i++) {
+      const p = transportCandidates[i];
+      const personIndex = field.personIndex(particlePersonId[p]);
+      if (personIndex < 0 || missingByPerson[personIndex] === 0) continue;
+      const oldCell = cell[p];
+      const expectedX = (oldCell >= 0 ? cellX[oldCell] : this.px[p]) + field.peopleDx[personIndex];
+      const expectedY = (oldCell >= 0 ? cellY[oldCell] : this.py[p]) + field.peopleDy[personIndex];
+      const target = this.findTransportTarget(field, particlePersonId[p], expectedX, expectedY);
+      if (target < 0) continue;
+
+      cell[p] = target;
+      cellOwner[target] = p;
+      this.lifeTarget[p] = 1;
+      this.retargetedAt[p] = now;
+      missingByPerson[personIndex]--;
+      transportCandidates[i] = -1;
+      this.transportedLastFrame++;
+    }
+
+    // Índice espacial de partículas que ya eran libres (counting sort por bins). Los
+    // BODY sin target se liberan al final para impedir intercambios entre personas cercanas.
     const { binCursor, binStart, binItems } = this;
     const binCount = binCursor;
     binCount.fill(0);
@@ -190,7 +251,6 @@ export class ParticleSystem {
     }
     for (let b = 0; b < binCount.length; b++) binCursor[b] = binStart[b];
 
-    const { activeList, activeCount, cellX, cellY } = field;
     const stagger = this.settings.formationStagger;
     for (let k = 0; k < activeCount; k++) {
       const c = activeList[k];
@@ -209,7 +269,18 @@ export class ParticleSystem {
       mode[p] = BODY;
       cell[p] = c;
       cellOwner[c] = p;
+      particlePersonId[p] = cellPersonId[c];
+      this.retargetedAt[p] = -Infinity;
       this.lifeTarget[p] = 1;
+      this.formedLastFrame++;
+    }
+
+    for (let i = 0; i < candidateCount; i++) {
+      const p = transportCandidates[i];
+      if (p >= 0) {
+        this.release(p, now);
+        this.releasedLastFrame++;
+      }
     }
   }
 
@@ -223,7 +294,7 @@ export class ParticleSystem {
     this.flow.update(now);
     const flow = this.flow;
     const field = this.field;
-    const { px, py, vx, vy, bond, life, lifeTarget, fadeMs, mode, cell, excite, glow, proximity, seed, phase, jitterX, jitterY, releasedAt } = this;
+    const { px, py, vx, vy, bond, life, lifeTarget, fadeMs, mode, cell, excite, glow, proximity, seed, phase, jitterX, jitterY, releasedAt, retargetedAt } = this;
     const renderData = this.renderData;
 
     const scale = this.scale;
@@ -235,6 +306,7 @@ export class ParticleSystem {
     const peopleCount = field ? field.peopleCount : 0;
 
     const bodyDamping = Math.pow(s.particleDamping, h);
+    const trackingDamping = Math.pow(s.trackingDamping, h);
     const ambientDamping = Math.pow(s.ambientDamping, h);
     const maxSpeed = s.maxSpeed * scale;
     const maxSpeedSq = maxSpeed * maxSpeed;
@@ -300,8 +372,14 @@ export class ParticleSystem {
         flow.sample(x, y);
         // Mientras el enlace es débil la partícula todavía "nada" en el campo y se curva al llegar.
         const swirl = (1 - ease) * s.ambientDrift * 6;
-        const k = s.particleAttraction * ease;
-        const damping = ambientDamping + (bodyDamping - ambientDamping) * ease;
+        const trackingAge = now - retargetedAt[p];
+        const trackingBlend = trackingAge >= 0 && trackingAge < s.trackingResponseMs
+          ? 1 - trackingAge / s.trackingResponseMs
+          : 0;
+        const bodyAttraction = lerp(s.particleAttraction, s.trackingAttraction, trackingBlend);
+        const responsiveDamping = lerp(bodyDamping, trackingDamping, trackingBlend);
+        const k = bodyAttraction * ease;
+        const damping = ambientDamping + (responsiveDamping - ambientDamping) * ease;
         for (let i = 0; i < substeps; i++) {
           velX = (velX + ((tx - x) * k + flow.sampleX * swirl) * h) * damping;
           velY = (velY + ((ty - y) * k + flow.sampleY * swirl) * h) * damping;
@@ -470,6 +548,8 @@ export class ParticleSystem {
       if (this.mode[p] !== BODY) continue;
       this.mode[p] = AMBIENT;
       this.cell[p] = -1;
+      this.particlePersonId[p] = -1;
+      this.retargetedAt[p] = -Infinity;
       this.releasedAt[p] = now;
     }
     this.cellOwner = new Int32Array(field.cellCount).fill(-1);
@@ -477,8 +557,10 @@ export class ParticleSystem {
   }
 
   private release(p: number, now: number): void {
-    this.cellOwner[this.cell[p]] = -1;
+    if (this.cell[p] >= 0) this.cellOwner[this.cell[p]] = -1;
     this.cell[p] = -1;
+    this.particlePersonId[p] = -1;
+    this.retargetedAt[p] = -Infinity;
     this.mode[p] = AMBIENT;
     this.releasedAt[p] = now;
     // Conserva el momentum y agrega un pequeño impulso: la silueta se fragmenta en lugar de apagarse.
@@ -502,6 +584,8 @@ export class ParticleSystem {
     this.proximity[p] = 0;
     this.excite[p] = 0;
     this.releasedAt[p] = 0;
+    this.particlePersonId[p] = -1;
+    this.retargetedAt[p] = -Infinity;
   }
 
   private spawnAmbient(p: number): void {
@@ -515,6 +599,8 @@ export class ParticleSystem {
     this.bond[p] = 0;
     this.excite[p] = 0;
     this.releasedAt[p] = 0;
+    this.particlePersonId[p] = -1;
+    this.retargetedAt[p] = -Infinity;
     this.mode[p] = AMBIENT;
   }
 
@@ -522,7 +608,48 @@ export class ParticleSystem {
     this.mode[p] = DORMANT;
     this.life[p] = 0;
     this.lifeTarget[p] = 0;
+    this.cell[p] = -1;
+    this.particlePersonId[p] = -1;
+    this.retargetedAt[p] = -Infinity;
     this.dormantStack[this.dormantTop++] = p;
+  }
+
+  /** Busca una celda nueva en anillos de la propia retícula; coste acotado, nunca O(N²). */
+  private findTransportTarget(field: TargetField, personId: number, x: number, y: number): number {
+    if (field.cellCount === 0) return -1;
+    const originX = field.cellX[0];
+    const originY = field.cellY[0];
+    const centerCol = Math.max(0, Math.min(field.cols - 1, Math.round((x - originX) / field.spacing)));
+    const centerRow = Math.max(0, Math.min(field.rows - 1, Math.round((y - originY) / field.spacing)));
+    const maxRings = Math.max(1, Math.ceil((this.settings.trackingSearchRadius * this.scale) / field.spacing));
+    const { cols, rows, active, cellPersonId } = field;
+
+    for (let ring = 0; ring <= maxRings; ring++) {
+      const r0 = centerRow - ring;
+      const r1 = centerRow + ring;
+      const c0 = centerCol - ring;
+      const c1 = centerCol + ring;
+      let best = -1;
+      let bestDistance = Infinity;
+      for (let r = r0; r <= r1; r++) {
+        if (r < 0 || r >= rows) continue;
+        const step = r === r0 || r === r1 ? 1 : Math.max(1, c1 - c0);
+        for (let c = c0; c <= c1; c += step) {
+          if (c < 0 || c >= cols) continue;
+          const target = r * cols + c;
+          if (active[target] === 0 || this.cellOwner[target] >= 0 || cellPersonId[target] !== personId) continue;
+          const dx = field.cellX[target] - x;
+          const dy = field.cellY[target] - y;
+          const distance = dx * dx + dy * dy;
+          if (distance < bestDistance) {
+            best = target;
+            bestDistance = distance;
+          }
+        }
+      }
+      if (best >= 0) return best;
+    }
+    return -1;
   }
 
   /** Mantiene el campo ambiental en su población deseada con fundidos graduales. */

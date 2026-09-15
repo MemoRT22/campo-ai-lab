@@ -26,6 +26,8 @@ export class TargetField {
   active = new Uint8Array(0);
   cellProximity = new Float32Array(0);
   cellEdge = new Uint8Array(0);
+  /** Track temporal dueño de cada celda activa; -1 para fondo. No es identidad persistente. */
+  cellPersonId = new Int32Array(0);
   /** Celdas activas en orden aleatorio estable (evita sesgos de barrido al asignar). */
   activeList = new Int32Array(0);
   activeCount = 0;
@@ -35,6 +37,10 @@ export class TargetField {
   readonly peopleX: Float32Array;
   readonly peopleY: Float32Array;
   readonly peopleProximity: Float32Array;
+  readonly peopleId: Int32Array;
+  /** Desplazamiento del centro de cada track desde el frame de visión anterior, en px CSS. */
+  readonly peopleDx: Float32Array;
+  readonly peopleDy: Float32Array;
   /** Copia de la última detección para mapear gestos. */
   readonly lastPeople: PersonInfo[] = [];
 
@@ -52,14 +58,17 @@ export class TargetField {
   private lastUpdate = 0;
 
   private readonly slotKeep: Float32Array;
+  private readonly slotPersonId: Int32Array;
   private readonly slotProximity: Float32Array;
   private readonly slotCount: Int32Array;
   private readonly slotSumX: Float64Array;
   private readonly slotSumY: Float64Array;
+  private readonly trackCenters = new Map<number, { x: number; y: number; lastSeen: number }>();
 
   constructor(private readonly config: Config) {
     const slots = 8;
     this.slotKeep = new Float32Array(slots);
+    this.slotPersonId = new Int32Array(slots).fill(-1);
     this.slotProximity = new Float32Array(slots);
     this.slotCount = new Int32Array(slots);
     this.slotSumX = new Float64Array(slots);
@@ -67,6 +76,9 @@ export class TargetField {
     this.peopleX = new Float32Array(slots);
     this.peopleY = new Float32Array(slots);
     this.peopleProximity = new Float32Array(slots);
+    this.peopleId = new Int32Array(slots).fill(-1);
+    this.peopleDx = new Float32Array(slots);
+    this.peopleDy = new Float32Array(slots);
   }
 
   resize(width: number, height: number): void {
@@ -84,6 +96,7 @@ export class TargetField {
     this.active = new Uint8Array(n);
     this.cellProximity = new Float32Array(n);
     this.cellEdge = new Uint8Array(n);
+    this.cellPersonId = new Int32Array(n).fill(-1);
     this.activeList = new Int32Array(n);
     this.rank = new Float32Array(n);
     this.cellPerson = new Int8Array(n);
@@ -112,6 +125,8 @@ export class TargetField {
     this.mappingKey = '';
     this.activeCount = 0;
     this.peopleCount = 0;
+    this.peopleId.fill(-1);
+    this.trackCenters.clear();
     this.version++;
   }
 
@@ -124,6 +139,7 @@ export class TargetField {
 
     const { slotKeep, slotProximity, slotCount, slotSumX, slotSumY } = this;
     slotKeep.fill(0);
+    this.slotPersonId.fill(-1);
     slotCount.fill(0);
     slotSumX.fill(0);
     slotSumY.fill(0);
@@ -134,6 +150,7 @@ export class TargetField {
       if (!person.confirmed || person.slot >= slotKeep.length) continue;
       slotProximity[person.slot] = person.proximity;
       slotKeep[person.slot] = lerp(far, close, person.proximity);
+      this.slotPersonId[person.slot] = person.id;
     }
 
     const { cols, rows, colToMask, rowToMask, cellPerson, cellX, cellY } = this;
@@ -174,9 +191,26 @@ export class TargetField {
       slotKeep[s] *= this.budgetScale;
       if (slotCount[s] === 0) continue;
       const k = this.peopleCount++;
-      this.peopleX[k] = slotSumX[s] / slotCount[s];
-      this.peopleY[k] = slotSumY[s] / slotCount[s];
+      const x = slotSumX[s] / slotCount[s];
+      const y = slotSumY[s] / slotCount[s];
+      const id = this.slotPersonId[s];
+      const previous = this.trackCenters.get(id);
+      this.peopleX[k] = x;
+      this.peopleY[k] = y;
       this.peopleProximity[k] = slotProximity[s];
+      this.peopleId[k] = id;
+      this.peopleDx[k] = previous ? x - previous.x : 0;
+      this.peopleDy[k] = previous ? y - previous.y : 0;
+      if (previous) {
+        previous.x = x;
+        previous.y = y;
+        previous.lastSeen = now;
+      } else {
+        this.trackCenters.set(id, { x, y, lastSeen: now });
+      }
+    }
+    for (const [id, center] of this.trackCenters) {
+      if (now - center.lastSeen > cfg.vision.trackTimeoutMs * 2) this.trackCenters.delete(id);
     }
 
     const { order, rank, active, activeList, cellProximity, cellEdge } = this;
@@ -188,9 +222,11 @@ export class TargetField {
       const slot = cellPerson[i];
       if (slot < 0 || rank[i] >= slotKeep[slot]) {
         active[i] = 0;
+        this.cellPersonId[i] = -1;
         continue;
       }
       active[i] = 1;
+      this.cellPersonId[i] = this.slotPersonId[slot];
       activeList[count++] = i;
       cellProximity[i] = slotProximity[slot];
       const c = i % cols;
@@ -209,7 +245,15 @@ export class TargetField {
     this.active.fill(0);
     this.activeCount = 0;
     this.peopleCount = 0;
+    this.peopleId.fill(-1);
+    this.cellPersonId.fill(-1);
+    this.trackCenters.clear();
     this.lastPeople.length = 0;
+  }
+
+  personIndex(id: number): number {
+    for (let i = 0; i < this.peopleCount; i++) if (this.peopleId[i] === id) return i;
+    return -1;
   }
 
   /** Convierte coordenadas normalizadas de cámara a px CSS en pantalla (aplica recorte, encuadre y espejo). */
