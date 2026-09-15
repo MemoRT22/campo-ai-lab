@@ -149,6 +149,7 @@ export class MockVisionSource implements VisionSource {
       width: WIDTH,
       height: HEIGHT,
       personMap: new Uint8Array(WIDTH * HEIGHT),
+      confidenceMap: new Uint8Array(WIDTH * HEIGHT),
       people: [],
       timestamp: 0,
       inferenceMs: 0,
@@ -194,7 +195,7 @@ export class MockVisionSource implements VisionSource {
     for (let i = 0; i < confidence.length; i++) confidence[i] = pixels[i * 4] / 255;
 
     const started = performance.now();
-    this.frame.people = this.processor.process(confidence, WIDTH, HEIGHT, now, this.frame.personMap);
+    this.frame.people = this.processor.process(confidence, WIDTH, HEIGHT, now, this.frame.personMap, this.frame.confidenceMap);
     this.frame.processingMs = performance.now() - started;
     this.frame.timestamp = now;
     this.hasPending = true;

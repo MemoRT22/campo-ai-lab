@@ -65,6 +65,9 @@ export class TargetField {
   active = new Uint8Array(0);
   cellProximity = new Float32Array(0);
   cellEdge = new Uint8Array(0);
+  /** Desplazamiento (px CSS) de cada celda de borde hacia el contorno subpíxel; 0 en el interior. */
+  cellOffsetX = new Float32Array(0);
+  cellOffsetY = new Float32Array(0);
   /** Track temporal dueño de cada celda activa; -1 para fondo. No es identidad persistente. */
   cellPersonId = new Int32Array(0);
   /** Celdas activas en orden aleatorio estable (evita sesgos de barrido al asignar). */
@@ -113,6 +116,14 @@ export class TargetField {
   private cellPerson = new Int8Array(0);
   private colToMask = new Int32Array(0);
   private rowToMask = new Int32Array(0);
+  /** Coordenada continua de la máscara (px de máscara) para cada columna y fila; -1 fuera. */
+  private colToMaskF = new Float32Array(0);
+  private rowToMaskF = new Float32Array(0);
+  /** Histéresis por celda del contorno subpíxel. */
+  private cellOn = new Uint8Array(0);
+  /** Px CSS de pantalla por px de máscara (con signo del espejo en X). */
+  private screenPerMaskX = 1;
+  private screenPerMaskY = 1;
   private mappingKey = '';
   private mapOffsetX = 0;
   private mapOffsetY = 0;
@@ -177,12 +188,17 @@ export class TargetField {
     this.active = new Uint8Array(n);
     this.cellProximity = new Float32Array(n);
     this.cellEdge = new Uint8Array(n);
+    this.cellOffsetX = new Float32Array(n);
+    this.cellOffsetY = new Float32Array(n);
+    this.cellOn = new Uint8Array(n);
     this.cellPersonId = new Int32Array(n).fill(-1);
     this.activeList = new Int32Array(n);
     this.rank = new Float32Array(n);
     this.cellPerson = new Int8Array(n);
     this.colToMask = new Int32Array(this.cols);
     this.rowToMask = new Int32Array(this.rows);
+    this.colToMaskF = new Float32Array(this.cols);
+    this.rowToMaskF = new Float32Array(this.rows);
 
     const offsetX = (width - (this.cols - 1) * this.spacing) / 2;
     const offsetY = (height - (this.rows - 1) * this.spacing) / 2;
@@ -258,7 +274,10 @@ export class TargetField {
     const { cols, rows, colToMask, rowToMask, cellPerson, cellX, cellY } = this;
     const map = frame.personMap;
     const maskWidth = frame.width;
-    for (let r = 0; r < rows; r++) {
+    const confidence = frame.confidenceMap;
+    if (confidence && confidence.length === map.length && frame.width > 1 && frame.height > 1) {
+      this.sampleContour(frame, confidence);
+    } else for (let r = 0; r < rows; r++) {
       const my = rowToMask[r];
       const rowStart = r * cols;
       for (let c = 0; c < cols; c++) {
@@ -303,14 +322,28 @@ export class TargetField {
       if (now - center.lastSeen > cfg.vision.trackTimeoutMs * 2) this.trackCenters.delete(id);
     }
 
-    const { order, rank, active, activeList, cellProximity, cellEdge } = this;
+    const { order, rank, active, activeList, cellProximity, cellEdge, cellOffsetX, cellOffsetY } = this;
+    const { protectEdges, edgeSnap } = cfg.particles.silhouette;
+    const snapContour = confidence !== undefined && confidence.length === map.length && edgeSnap > 0;
     const lastCol = cols - 1;
     const lastRow = rows - 1;
     let count = 0;
     for (let k = 0; k < this.cellCount; k++) {
       const i = order[k];
       const slot = cellPerson[i];
-      if (slot < 0 || rank[i] >= slotKeep[slot]) {
+      if (slot < 0) {
+        active[i] = 0;
+        this.cellPersonId[i] = -1;
+        continue;
+      }
+      const c = i % cols;
+      const r = (i - c) / cols;
+      const edge =
+        c === 0 || c === lastCol || r === 0 || r === lastRow ||
+        cellPerson[i - 1] !== slot || cellPerson[i + 1] !== slot ||
+        cellPerson[i - cols] !== slot || cellPerson[i + cols] !== slot;
+      // El presupuesto aclara el interior, nunca el contorno.
+      if (rank[i] >= slotKeep[slot] && !(edge && protectEdges)) {
         active[i] = 0;
         this.cellPersonId[i] = -1;
         continue;
@@ -319,20 +352,19 @@ export class TargetField {
       this.cellPersonId[i] = this.slotPersonId[slot];
       activeList[count++] = i;
       cellProximity[i] = slotProximity[slot];
-      const c = i % cols;
-      const r = (i - c) / cols;
-      cellEdge[i] =
-        c === 0 || c === lastCol || r === 0 || r === lastRow ||
-        cellPerson[i - 1] !== slot || cellPerson[i + 1] !== slot ||
-        cellPerson[i - cols] !== slot || cellPerson[i + cols] !== slot
-          ? 1
-          : 0;
+      cellEdge[i] = edge ? 1 : 0;
+      if (edge && snapContour && confidence) this.snapToContour(i, c, r, frame.width, frame.height, confidence);
+      else {
+        cellOffsetX[i] = 0;
+        cellOffsetY[i] = 0;
+      }
     }
     this.activeCount = count;
   }
 
   clear(): void {
     this.active.fill(0);
+    this.cellOn.fill(0);
     this.activeCount = 0;
     this.peopleCount = 0;
     this.pendingCount = 0;
@@ -531,6 +563,133 @@ export class TargetField {
     if (!previous) this.trackCenters.set(id, motion);
   }
 
+  /**
+   * Contorno subpíxel: cada celda interpola la confianza suavizada de la máscara (bilineal) en su
+   * posición exacta. Así el borde sigue la forma real en lugar de escalones de píxeles de máscara,
+   * aunque la retícula sea más fina que la máscara. Cada celda tiene histéresis propia.
+   */
+  private sampleContour(frame: VisionFrame, confidence: Uint8Array): void {
+    const { cols, rows, colToMaskF, rowToMaskF, cellPerson, cellX, cellY, cellOn, slotKeep, slotCount, slotSumX, slotSumY } = this;
+    const { contourThreshold, contourHysteresis } = this.config.particles.silhouette;
+    const onLevel = contourThreshold * 255;
+    const holdLevel = Math.max(0, contourThreshold - contourHysteresis) * 255;
+    const map = frame.personMap;
+    const width = frame.width;
+    const lastX = width - 2;
+    const lastY = frame.height - 2;
+
+    for (let r = 0; r < rows; r++) {
+      const my = rowToMaskF[r];
+      const rowStart = r * cols;
+      if (my < 0) {
+        for (let c = 0; c < cols; c++) {
+          cellPerson[rowStart + c] = -1;
+          cellOn[rowStart + c] = 0;
+        }
+        continue;
+      }
+      const fy = my - 0.5;
+      let y0 = Math.floor(fy);
+      if (y0 < 0) y0 = 0;
+      else if (y0 > lastY) y0 = lastY;
+      let ty = fy - y0;
+      ty = ty < 0 ? 0 : ty > 1 ? 1 : ty;
+
+      for (let c = 0; c < cols; c++) {
+        const i = rowStart + c;
+        const mx = colToMaskF[c];
+        if (mx < 0) {
+          cellPerson[i] = -1;
+          cellOn[i] = 0;
+          continue;
+        }
+        const fx = mx - 0.5;
+        let x0 = Math.floor(fx);
+        if (x0 < 0) x0 = 0;
+        else if (x0 > lastX) x0 = lastX;
+        let tx = fx - x0;
+        tx = tx < 0 ? 0 : tx > 1 ? 1 : tx;
+
+        const i00 = y0 * width + x0;
+        const i10 = i00 + 1;
+        const i01 = i00 + width;
+        const i11 = i01 + 1;
+        const w00 = (1 - tx) * (1 - ty);
+        const w10 = tx * (1 - ty);
+        const w01 = (1 - tx) * ty;
+        const w11 = tx * ty;
+        const value = confidence[i00] * w00 + confidence[i10] * w10 + confidence[i01] * w01 + confidence[i11] * w11;
+        if (value < (cellOn[i] === 1 ? holdLevel : onLevel)) {
+          cellPerson[i] = -1;
+          cellOn[i] = 0;
+          continue;
+        }
+
+        // La silueta dueña es la etiqueta confirmada con más peso entre los cuatro vecinos.
+        let slot = -1;
+        let best = 0;
+        let label = map[i00];
+        if (label !== 0 && slotKeep[label - 1] > 0 && w00 > best) { slot = label - 1; best = w00; }
+        label = map[i10];
+        if (label !== 0 && slotKeep[label - 1] > 0 && w10 > best) { slot = label - 1; best = w10; }
+        label = map[i01];
+        if (label !== 0 && slotKeep[label - 1] > 0 && w01 > best) { slot = label - 1; best = w01; }
+        label = map[i11];
+        if (label !== 0 && slotKeep[label - 1] > 0 && w11 > best) slot = label - 1;
+        if (slot < 0) {
+          cellPerson[i] = -1;
+          cellOn[i] = 0;
+          continue;
+        }
+        cellOn[i] = 1;
+        cellPerson[i] = slot;
+        slotCount[slot]++;
+        slotSumX[slot] += cellX[i];
+        slotSumY[slot] += cellY[i];
+      }
+    }
+  }
+
+  /**
+   * Coloca una celda de borde sobre el contorno: un paso de Newton sobre la confianza bilineal
+   * (a lo largo del gradiente) hasta `contourThreshold`, limitado a una fracción de la separación.
+   */
+  private snapToContour(i: number, c: number, r: number, width: number, height: number, confidence: Uint8Array): void {
+    const { contourThreshold, edgeSnap, maxSnap } = this.config.particles.silhouette;
+    const fx = this.colToMaskF[c] - 0.5;
+    const fy = this.rowToMaskF[r] - 0.5;
+    const x0 = Math.min(width - 2, Math.max(0, Math.floor(fx)));
+    const y0 = Math.min(height - 2, Math.max(0, Math.floor(fy)));
+    const tx = Math.min(1, Math.max(0, fx - x0));
+    const ty = Math.min(1, Math.max(0, fy - y0));
+    const i00 = y0 * width + x0;
+    const c00 = confidence[i00] / 255;
+    const c10 = confidence[i00 + 1] / 255;
+    const c01 = confidence[i00 + width] / 255;
+    const c11 = confidence[i00 + width + 1] / 255;
+    const value = c00 * (1 - tx) * (1 - ty) + c10 * tx * (1 - ty) + c01 * (1 - tx) * ty + c11 * tx * ty;
+    // Gradiente en px de máscara.
+    const gx = (c10 - c00) * (1 - ty) + (c11 - c01) * ty;
+    const gy = (c01 - c00) * (1 - tx) + (c11 - c10) * tx;
+    const gradientSq = gx * gx + gy * gy;
+    if (gradientSq < 1e-6) {
+      this.cellOffsetX[i] = 0;
+      this.cellOffsetY[i] = 0;
+      return;
+    }
+    const step = ((contourThreshold - value) / gradientSq) * edgeSnap;
+    let ox = gx * step * this.screenPerMaskX;
+    let oy = gy * step * this.screenPerMaskY;
+    const limit = maxSnap * this.spacing;
+    const distance = Math.hypot(ox, oy);
+    if (distance > limit) {
+      ox *= limit / distance;
+      oy *= limit / distance;
+    }
+    this.cellOffsetX[i] = ox;
+    this.cellOffsetY[i] = oy;
+  }
+
   private ensureMapping(maskWidth: number, maskHeight: number): void {
     const { crop, fit, mirror } = this.config.camera;
     const key = `${this.version}:${maskWidth}x${maskHeight}`;
@@ -549,18 +708,25 @@ export class TargetField {
     this.mapScaleX = displayW;
     this.mapScaleY = displayH;
 
+    this.screenPerMaskX = (displayW / (crop.width * maskWidth)) * (mirror ? -1 : 1);
+    this.screenPerMaskY = displayH / (crop.height * maskHeight);
     for (let c = 0; c < this.cols; c++) {
       let u = (this.cellX[c] - this.mapOffsetX) / displayW;
       if (u < 0 || u >= 1) {
         this.colToMask[c] = -1;
+        this.colToMaskF[c] = -1;
         continue;
       }
       if (mirror) u = 1 - u;
-      this.colToMask[c] = Math.min(maskWidth - 1, Math.floor((crop.x + u * crop.width) * maskWidth));
+      const maskX = (crop.x + u * crop.width) * maskWidth;
+      this.colToMask[c] = Math.min(maskWidth - 1, Math.floor(maskX));
+      this.colToMaskF[c] = maskX;
     }
     for (let r = 0; r < this.rows; r++) {
       const v = (this.cellY[r * this.cols] - this.mapOffsetY) / displayH;
-      this.rowToMask[r] = v < 0 || v >= 1 ? -1 : Math.min(maskHeight - 1, Math.floor((crop.y + v * crop.height) * maskHeight));
+      const maskY = (crop.y + v * crop.height) * maskHeight;
+      this.rowToMask[r] = v < 0 || v >= 1 ? -1 : Math.min(maskHeight - 1, Math.floor(maskY));
+      this.rowToMaskF[r] = v < 0 || v >= 1 ? -1 : maskY;
     }
   }
 }

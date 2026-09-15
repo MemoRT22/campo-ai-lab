@@ -36,7 +36,7 @@ async function init(message: InitMessage): Promise<void> {
 }
 
 function handleFrame(message: FrameMessage): void {
-  const { bitmap, timestamp, recycled } = message;
+  const { bitmap, timestamp, recycled, recycledConfidence } = message;
   let produced = false;
 
   try {
@@ -45,7 +45,7 @@ function handleFrame(message: FrameMessage): void {
       const started = performance.now();
       let width = 0;
       let height = 0;
-      const output: { personMap: Uint8Array | null } = { personMap: null };
+      const output: { personMap: Uint8Array | null; confidenceMap: Uint8Array | null } = { personMap: null, confidenceMap: null };
       let people: PersonInfo[] = [];
       let inferenceMs = 0;
       let processingMs = 0;
@@ -55,12 +55,13 @@ function handleFrame(message: FrameMessage): void {
         height = maskHeight;
         const size = width * height;
         output.personMap = recycled && recycled.byteLength === size ? new Uint8Array(recycled) : new Uint8Array(size);
+        output.confidenceMap = recycledConfidence && recycledConfidence.byteLength === size ? new Uint8Array(recycledConfidence) : new Uint8Array(size);
         const processingStarted = performance.now();
-        people = mask.process(confidence, width, height, timestamp, output.personMap);
+        people = mask.process(confidence, width, height, timestamp, output.personMap, output.confidenceMap);
         processingMs = performance.now() - processingStarted;
       });
-      const personMap = output.personMap;
-      if (personMap) {
+      const { personMap, confidenceMap } = output;
+      if (personMap && confidenceMap) {
         let poses: PoseInfo[] = [];
         let poseTimestamp: number | null = null;
         let poseInferenceMs = 0;
@@ -73,9 +74,10 @@ function handleFrame(message: FrameMessage): void {
         }
         produced = true;
         const personMapBuffer = personMap.buffer as ArrayBuffer;
+        const confidenceBuffer = confidenceMap.buffer as ArrayBuffer;
         post(
-          { type: 'result', width, height, personMap: personMapBuffer, people, timestamp, inferenceMs, processingMs, poses, poseTimestamp, poseInferenceMs },
-          [personMapBuffer],
+          { type: 'result', width, height, personMap: personMapBuffer, confidenceMap: confidenceBuffer, people, timestamp, inferenceMs, processingMs, poses, poseTimestamp, poseInferenceMs },
+          [personMapBuffer, confidenceBuffer],
         );
       }
     }
@@ -85,7 +87,12 @@ function handleFrame(message: FrameMessage): void {
     bitmap.close();
   }
 
-  if (!produced) post({ type: 'skipped', recycled }, recycled ? [recycled] : []);
+  if (!produced) {
+    const transfer: ArrayBuffer[] = [];
+    if (recycled) transfer.push(recycled);
+    if (recycledConfidence) transfer.push(recycledConfidence);
+    post({ type: 'skipped', recycled, recycledConfidence }, transfer);
+  }
 }
 
 self.addEventListener('message', (event: MessageEvent<ToWorker>) => {

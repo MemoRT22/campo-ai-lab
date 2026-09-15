@@ -104,20 +104,42 @@ export const defaultConfig = {
 
   particles: {
     /** Tamaño total del pool (ambiente + cuerpos + transiciones). */
-    particleCount: 9000,
+    particleCount: 24000,
     idleParticleCount: 1050,
-    /** Máximo de partículas repartidas entre todas las siluetas. */
-    bodyParticleBudget: 5600,
-    /** Separación de la retícula de muestreo, en px de referencia a 1920×1080. */
-    particleSpacing: 9,
+    /**
+     * Máximo de partículas repartidas entre todas las siluetas. Al superarlo sólo se aclara el
+     * interior (ver silhouette.protectEdges): con muchas personas la forma se conserva.
+     */
+    bodyParticleBudget: 15000,
+    /**
+     * Separación de la retícula de muestreo, en px de referencia a 1920×1080. Más fina que un píxel
+     * de máscara (6 px): el contorno subpíxel aprovecha esa resolución.
+     */
+    particleSpacing: 5.5,
     /** Fracción de celdas ocupadas según proximidad. */
-    particleDensity: { far: 0.75, close: 1 },
-    particleSize: { idle: 1.7, far: 2.5, close: 2.9 },
+    particleDensity: { far: 1, close: 1 },
+    particleSize: { idle: 1.7, far: 2.2, close: 2.6 },
     particleOpacity: { idle: 0.34, far: 0.68, close: 0.95 },
-    /** Desorden dentro de cada celda (0 = retícula perfecta). */
-    cellJitter: 0.8,
+    /** Desorden dentro de cada celda interior (0 = retícula perfecta). El contorno nunca se desordena. */
+    cellJitter: 0.5,
+    /**
+     * SILHOUETTE DETAIL — fidelidad del contorno. Cada celda se evalúa sobre la confianza interpolada
+     * (no sobre píxeles binarios de la máscara) y las partículas del borde se colocan sobre el contorno real.
+     */
+    silhouette: {
+      /** Confianza que define el contorno (entre maskThreshold − maskHysteresis y maskThreshold). */
+      contourThreshold: 0.5,
+      /** Una celda encendida sólo se apaga por debajo de contourThreshold − este valor: el borde no parpadea. */
+      contourHysteresis: 0.06,
+      /** 1 = el borde se coloca exactamente sobre el contorno; 0 = centro de celda. */
+      edgeSnap: 1,
+      /** Desplazamiento máximo del borde hacia el contorno (fracción de particleSpacing). */
+      maxSnap: 0.75,
+      /** El presupuesto nunca elimina celdas del contorno: la forma se conserva aunque el interior se aclare. */
+      protectEdges: true,
+    },
     /** Amplitud del temblor vivo de cada partícula sobre el cuerpo (px). */
-    particleNoise: 0.9,
+    particleNoise: 0.6,
 
     /* INITIAL FORMATION — entrada lenta y cinematográfica. */
     particleAttraction: 0.16,
@@ -214,8 +236,8 @@ export const defaultConfig = {
       /** Estela y desprendimiento son más tenues que el núcleo. */
       effectAlpha: 0.75,
       /** Cuerpo quieto: temblor del interior (fracción de particleNoise) y flotación lenta del borde. */
-      interiorNoise: 0.45,
-      edgeFloat: 1.9,
+      interiorNoise: 0.3,
+      edgeFloat: 0.5,
       edgeFloatSpeed: 0.5,
     },
 

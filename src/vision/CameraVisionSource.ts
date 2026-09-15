@@ -24,6 +24,7 @@ export class CameraVisionSource implements VisionSource {
   private sentAt = 0;
   private lastCaptureAt = 0;
   private recycled: ArrayBuffer | null = null;
+  private recycledConfidence: ArrayBuffer | null = null;
   private hasPending = false;
   private running = false;
 
@@ -31,6 +32,7 @@ export class CameraVisionSource implements VisionSource {
     width: 0,
     height: 0,
     personMap: new Uint8Array(0),
+    confidenceMap: new Uint8Array(0),
     people: [],
     timestamp: 0,
     inferenceMs: 0,
@@ -114,9 +116,14 @@ export class CameraVisionSource implements VisionSource {
           return;
         }
         const recycled = this.recycled;
+        const recycledConfidence = this.recycledConfidence;
         this.recycled = null;
-        const message: FrameMessage = { type: 'frame', bitmap, timestamp: now, recycled };
-        worker.postMessage(message, recycled ? [bitmap, recycled] : [bitmap]);
+        this.recycledConfidence = null;
+        const message: FrameMessage = { type: 'frame', bitmap, timestamp: now, recycled, recycledConfidence };
+        const transfer: Transferable[] = [bitmap];
+        if (recycled) transfer.push(recycled);
+        if (recycledConfidence) transfer.push(recycledConfidence);
+        worker.postMessage(message, transfer);
       })
       .catch((error: unknown) => {
         if (worker === this.worker) this.inFlight = false;
@@ -162,6 +169,7 @@ export class CameraVisionSource implements VisionSource {
     this.workerReady = false;
     this.inFlight = false;
     this.recycled = null;
+    this.recycledConfidence = null;
     this.hasPending = false;
     this.lastFrameAt = 0;
 
@@ -193,9 +201,11 @@ export class CameraVisionSource implements VisionSource {
         const frame = this.frame;
         // El frame anterior ya fue consumido en un requestAnimationFrame previo: su buffer se reutiliza.
         if (frame.personMap.byteLength > 0) this.recycled = frame.personMap.buffer as ArrayBuffer;
+        if (frame.confidenceMap && frame.confidenceMap.byteLength > 0) this.recycledConfidence = frame.confidenceMap.buffer as ArrayBuffer;
         frame.width = message.width;
         frame.height = message.height;
         frame.personMap = new Uint8Array(message.personMap);
+        frame.confidenceMap = new Uint8Array(message.confidenceMap);
         frame.people = message.people;
         frame.timestamp = message.timestamp;
         frame.inferenceMs = message.inferenceMs;
@@ -211,6 +221,7 @@ export class CameraVisionSource implements VisionSource {
         this.inFlight = false;
         this.status.worker = 'ready';
         if (message.recycled) this.recycled = message.recycled;
+        if (message.recycledConfidence) this.recycledConfidence = message.recycledConfidence;
         break;
       case 'error':
         this.status.lastError = message.message;

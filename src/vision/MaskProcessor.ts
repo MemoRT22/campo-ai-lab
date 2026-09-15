@@ -103,7 +103,18 @@ export class MaskProcessor {
     }
   }
 
-  process(confidence: Float32Array, width: number, height: number, timestamp: number, personMap: Uint8Array): PersonInfo[] {
+  /**
+   * `confidenceOut` (opcional) recibe la confianza ya suavizada, cuantizada a 0..255 y en cero fuera
+   * del recorte. Permite reconstruir el contorno con precisión subpíxel en pantalla.
+   */
+  process(
+    confidence: Float32Array,
+    width: number,
+    height: number,
+    timestamp: number,
+    personMap: Uint8Array,
+    confidenceOut: Uint8Array | null = null,
+  ): PersonInfo[] {
     this.ensureSize(width, height);
     const s = this.settings;
     const dt = this.lastTimestamp < 0 ? 33 : clamp(timestamp - this.lastTimestamp, 0, 1000);
@@ -131,7 +142,9 @@ export class MaskProcessor {
         let f = field[i];
         f += (value - f) * (value > f ? attack : release);
         field[i] = f;
-        binary[i] = insideY && x >= cropX0 && x < cropX1 && (f > on || (binary[i] === 1 && f > off)) ? 1 : 0;
+        const inside = insideY && x >= cropX0 && x < cropX1;
+        binary[i] = inside && (f > on || (binary[i] === 1 && f > off)) ? 1 : 0;
+        if (confidenceOut) confidenceOut[i] = inside ? (f <= 0 ? 0 : f >= 1 ? 255 : (f * 255 + 0.5) | 0) : 0;
       }
     }
 

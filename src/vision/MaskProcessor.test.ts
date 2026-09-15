@@ -40,3 +40,20 @@ describe('MaskProcessor', () => {
     expect(map.filter(Boolean).length).toBe(50);
   });
 });
+
+describe('MaskProcessor confidence output', () => {
+  it('entrega la confianza suavizada cuantizada y en cero fuera del ROI', () => {
+    const config = structuredClone(defaultConfig);
+    config.vision.spatialBlurRadius = 0;
+    config.vision.smoothingAttackMs = 0;
+    config.vision.presenceConfirmMs = 0;
+    config.camera.crop = { x: 0.5, y: 0, width: 0.5, height: 1 };
+    const processor = new MaskProcessor(maskSettingsFrom(config));
+    const confidence = new Float32Array(100).fill(0.75);
+    const map = new Uint8Array(100);
+    const out = new Uint8Array(100);
+    processor.process(confidence, 10, 10, 0, map, out);
+    expect(out[5 * 10 + 7]).toBe(Math.round(0.75 * 255));
+    expect(out[5 * 10 + 2]).toBe(0);
+  });
+});

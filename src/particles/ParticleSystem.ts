@@ -27,6 +27,8 @@ const PERSON_SLOTS = 8;
 const EFFECT_VISIBLE_PX = 0.75;
 /** Fracción de la corriente en cada extremo donde las partículas aparecen y se desvanecen. */
 const BRIDGE_END_FADE = 0.12;
+/** Por debajo de esta amplitud (px CSS) el temblor no se percibe y no se calcula. */
+const MIN_VISIBLE_NOISE_PX = 0.25;
 /** Fuerza de conexión bajo la cual una partícula regresa al campo. */
 const BRIDGE_RELEASE_STRENGTH = 0.01;
 /** Márgenes de la corriente donde se permite reclutar (evita tomar partículas junto a los cuerpos). */
@@ -679,8 +681,11 @@ export class ParticleSystem {
         const formed = trackingWeight(bc, s);
         // 0 al ser asignada, 1 cuando le toca colapsar: mientras espera ya se curva hacia el cuerpo.
         const waiting = b >= 0 || staggerSpan <= 0 ? 1 : clamp01(1 + b / staggerSpan);
-        let tx = cellX[c] + jitterX[p] * spacing;
-        let ty = cellY[c] + jitterY[p] * spacing;
+        // El borde se apoya sobre el contorno subpíxel; sólo el interior conserva su desorden.
+        const edge = cellEdge[c] === 1;
+        const cellJitter = edge ? 0 : spacing;
+        let tx = cellX[c] + (field ? field.cellOffsetX[c] : 0) + jitterX[p] * cellJitter;
+        let ty = cellY[c] + (field ? field.cellOffsetY[c] : 0) + jitterY[p] * cellJitter;
         let fast = 0;
         let letGo = 0;
         if (field && personIndex < 0) {
@@ -725,9 +730,11 @@ export class ParticleSystem {
           e = Math.max(e, textDetach * s.textParticleGlow);
         }
 
-        flow.sample(x, y);
         // Mientras el enlace es débil la partícula todavía "nada" en el campo y se curva al llegar.
         const swirl = (1 - ease) * s.ambientDrift * 6;
+        // Un cuerpo formado no usa el flujo: se evita muestrearlo en miles de partículas.
+        if (swirl > 0) flow.sample(x, y);
+        else flow.sampleX = flow.sampleY = 0;
         fast = Math.max(fast, retargetFastBlend(now - retargetedAt[p], s));
         const suspension = 1 - celebrationEnvelope * s.revealSuspension;
 
@@ -774,7 +781,6 @@ export class ParticleSystem {
         visualAlpha += fw.collapseGlow * 4 * ease * (1 - ease) * (1 - formed);
 
         // LIVING BODY — offset visual encima del núcleo: microestela y desprendimiento de borde.
-        const edge = cellEdge[c] === 1;
         const trailClass = (sd * 9.73) % 1 < (edge ? lb.trailRatioEdge : lb.trailRatioInterior);
         const shedClass = edge && (sd * 5.31) % 1 < lb.shedRatio;
         let ox = offX[p];
@@ -831,9 +837,13 @@ export class ParticleSystem {
         }
         // Quieto: el interior apenas tiembla y el borde flota lento. Sólo visual.
         const noise = noiseAmplitude * (edge ? lb.edgeFloat : lb.interiorNoise);
-        const noiseRate = edge ? lb.edgeFloatSpeed : 1;
-        renderX = x + ox + noise * Math.sin(time * (0.9 + sd * 0.8) * noiseRate + phase[p]);
-        renderY = y + oy + noise * Math.cos(time * (0.7 + sd * 0.9) * noiseRate + phase[p] * 1.7);
+        renderX = x + ox;
+        renderY = y + oy;
+        if (noise >= MIN_VISIBLE_NOISE_PX) {
+          const noiseRate = edge ? lb.edgeFloatSpeed : 1;
+          renderX += noise * Math.sin(time * (0.9 + sd * 0.8) * noiseRate + phase[p]);
+          renderY += noise * Math.cos(time * (0.7 + sd * 0.9) * noiseRate + phase[p] * 1.7);
+        }
 
         const prox = cellProximity[c];
         const glowTarget = lerp(opacityFar, opacityClose, prox) * (edge ? s.edgeBrightness : 1);
@@ -1090,15 +1100,23 @@ export class ParticleSystem {
       excite[p] = e;
 
       const vis = b <= 0 ? 0 : b >= 1 ? 1 : b;
-      const idleSize = sizeIdle * lerp(idleDepth.sizeFar, idleDepth.sizeNear, sd);
-      const twinkle = 1 - twinkleAmount + twinkleAmount * Math.sin(time * (0.32 + sd * 0.5) + phase[p]);
-      let size = idleSize;
-      let alpha = opacityIdle * lerp(idleDepth.alphaFar, idleDepth.alphaNear, sd) * twinkle * (1 + anticipation * s.formationAnticipationGlow);
-      if (vis > 0) {
-        const breathing = 1 + s.breathingAmount * Math.sin(time * 1.6 + phase[p]);
-        const bodySize = lerp(sizeFar, sizeClose, proximity[p]) * (0.75 + sd * 0.5) * breathing;
-        size = idleSize + (bodySize - idleSize) * vis;
-        alpha = alpha + (glow[p] - alpha) * vis;
+      let size: number;
+      let alpha: number;
+      if (vis >= 1) {
+        // Cuerpo formado: el aspecto del campo (profundidad, parpadeo) ya no participa.
+        size = lerp(sizeFar, sizeClose, proximity[p]) * (0.75 + sd * 0.5) * (1 + s.breathingAmount * Math.sin(time * 1.6 + phase[p]));
+        alpha = glow[p];
+      } else {
+        const idleSize = sizeIdle * lerp(idleDepth.sizeFar, idleDepth.sizeNear, sd);
+        const twinkle = 1 - twinkleAmount + twinkleAmount * Math.sin(time * (0.32 + sd * 0.5) + phase[p]);
+        size = idleSize;
+        alpha = opacityIdle * lerp(idleDepth.alphaFar, idleDepth.alphaNear, sd) * twinkle * (1 + anticipation * s.formationAnticipationGlow);
+        if (vis > 0) {
+          const breathing = 1 + s.breathingAmount * Math.sin(time * 1.6 + phase[p]);
+          const bodySize = lerp(sizeFar, sizeClose, proximity[p]) * (0.75 + sd * 0.5) * breathing;
+          size = idleSize + (bodySize - idleSize) * vis;
+          alpha = alpha + (glow[p] - alpha) * vis;
+        }
       }
       size *= visualSize * scale * (1 + e * s.gestureExciteSize) * lerp(1, s.textParticleSize, textDetach);
       alpha = (alpha * visualAlpha + e * s.gestureExciteAlpha) * l * lerp(1, s.textParticleAlpha, textDetach);

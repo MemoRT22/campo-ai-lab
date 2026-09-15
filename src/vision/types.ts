@@ -40,6 +40,11 @@ export interface VisionFrame {
   height: number;
   /** 0 = fondo, n = people[n − 1]. Válido sólo hasta la siguiente llamada a takeFrame(). */
   personMap: Uint8Array;
+  /**
+   * Confianza suavizada 0..255 del mismo tamaño que `personMap`. Si falta, la silueta se muestrea
+   * como máscara binaria (sin contorno subpíxel).
+   */
+  confidenceMap?: Uint8Array;
   people: PersonInfo[];
   /** performance.now() del hilo principal en el momento de la captura. */
   timestamp: number;
