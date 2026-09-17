@@ -64,6 +64,7 @@ export class DebugPanel {
   private readonly maskCtx: CanvasRenderingContext2D;
   private imageData: ImageData | null = null;
   private lastTextAt = 0;
+  private lastFrame: VisionFrame | null = null;
   private latestPoses: VisionFrame['poses'] = [];
   private inferenceInput = '—';
   private maskResolution = '—';
@@ -101,6 +102,7 @@ export class DebugPanel {
   }
 
   drawFrame(frame: VisionFrame): void {
+    this.lastFrame = frame;
     if (this.el.hidden) return;
     this.drawCamera();
     const { width, height, personMap, people } = frame;
@@ -217,6 +219,10 @@ export class DebugPanel {
         ` · pred ${Math.hypot(field.peoplePredictionX[i], field.peoplePredictionY[i]).toFixed(1)} px`,
       );
     }
+    const bodyAge = this.lastFrame ? Math.max(0, now - this.lastFrame.timestamp).toFixed(0) : '—';
+    const poseAge = this.lastFrame?.poseTimestamp !== null && this.lastFrame?.poseTimestamp !== undefined ? Math.max(0, now - this.lastFrame.poseTimestamp).toFixed(0) : '—';
+    const handAge = this.lastFrame?.hands && this.lastFrame.hands.length > 0 ? Math.max(0, now - this.lastFrame.hands[0].timestamp).toFixed(0) : '—';
+
     const lines = [
       `perfil      ${this.ctx.config.displayProfile.toUpperCase()}`,
       `render      ${perf.renderFps.toFixed(0)} fps · js ${perf.frameMs.toFixed(2)} ms`,
@@ -224,12 +230,11 @@ export class DebugPanel {
       `captura req ${camera.requestedWidth}×${camera.requestedHeight} @ ${camera.requestedFps} · entregada ${camera.deliveredWidth || '—'}×${camera.deliveredHeight || '—'} @ ${camera.deliveredFps ? camera.deliveredFps.toFixed(0) : '—'}`,
       `dispositivo ${camera.deviceIndex >= 0 ? `#${camera.deviceIndex}` : '—'} · ${camera.label || status.cameraDetail || '—'} · aspect ${camera.aspectRatio ? camera.aspectRatio.toFixed(3) : '—'}`,
       `inferencia  input ${this.inferenceInput} · máscara ${this.maskResolution} · preset ${this.ctx.config.vision.inferenceWidth}`,
-      `segmentación ${perf.segmentationFps.toFixed(1)} fps · ${perf.inferenceMs.toFixed(1)} ms`,
-      `pose        ${perf.poseFps.toFixed(1)} fps · ${perf.poseInferenceMs.toFixed(1)} ms`,
-      `manos       ${status.hands.state}${status.hands.segmentation ? ' + segmentación' : ''} · ${status.hands.fps.toFixed(1)} fps · ${status.hands.inferenceMs.toFixed(1)} ms · ${field.handsApplied}/${status.hands.hands} en silueta · ${field.handCells} celdas${status.hands.lastError ? ` · ${summarize(status.hands.lastError)}` : ''}`,
-      `máscara     ${perf.maskProcessingMs.toFixed(1)} ms`,
+      `segmentación ${perf.segmentationFps.toFixed(1)} fps · ${perf.inferenceMs.toFixed(1)} ms inf · ${perf.maskProcessingMs.toFixed(1)} ms mask · age ${bodyAge} ms`,
+      `pose        ${status.pose.state} · ${perf.poseFps.toFixed(1)} fps · ${perf.poseInferenceMs.toFixed(1)} ms inf · age ${poseAge} ms${status.pose.lastError ? ` · ${summarize(status.pose.lastError)}` : ''}`,
+      `manos       ${status.hands.state}${status.hands.segmentation ? ' + seg' : ''} · ${status.hands.fps.toFixed(1)} fps · ${status.hands.inferenceMs.toFixed(1)} ms inf · age ${handAge} ms · ${field.handsApplied}/${status.hands.hands} vistas${status.hands.lastError ? ` · ${summarize(status.hands.lastError)}` : ''}`,
       `ajustes     threshold ${this.ctx.config.vision.maskThreshold.toFixed(2)} · hysteresis ${this.ctx.config.vision.maskHysteresis.toFixed(2)} · min area ${(this.ctx.config.vision.minPersonArea * 100).toFixed(2)}%`,
-      `pipeline    ${perf.visionLatencyMs.toFixed(0)} ms (captura → resultado; no motion-to-photon)`,
+      `pipeline    ${perf.visionLatencyMs.toFixed(0)} ms (cámara → BODY frame renderizado; no motion-to-photon)`,
       `silueta     ${field.activeCount} celdas · densidad ${(field.densityApplied * 100).toFixed(0)}% · ${particles.bodyCount} BODY`,
       `partículas  ${particles.renderCount} render · ${particles.ambientCount} ambiente · ${particles.dormantCount} pool · budget ${this.ctx.config.particles.bodyParticleBudget}`,
       `tracking    ${this.ctx.config.particles.trackingResponseMs} ms · prediction ${this.ctx.config.particles.predictionMs} ms · activos ${predictionCount}`,

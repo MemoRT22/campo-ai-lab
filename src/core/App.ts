@@ -149,7 +149,7 @@ export class App {
         this.perf.recordVision(frame.inferenceMs, frame.processingMs, frame.timestamp, now);
         if (frame.poseTimestamp !== null) {
           for (const event of this.gestures.update(frame.poses, frame.people, frame.poseTimestamp)) this.interaction.handle(event, now);
-          this.perf.recordPose(frame.poseInferenceMs);
+          this.perf.recordPose(frame.poseInferenceMs, frame.poseTimestamp, now);
         }
         this.debug?.drawFrame(frame);
       } else if ((this.field.activeCount > 0 || this.field.peopleCount > 0) && now - this.source.lastFrameAt > this.config.vision.staleFrameMs) {

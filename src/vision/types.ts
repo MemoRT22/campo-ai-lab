@@ -55,7 +55,7 @@ export interface VisionFrame {
   inferenceMs: number;
   processingMs: number;
   poses: PoseInfo[];
-  /** null cuando este resultado sólo ejecutó segmentación. */
+  /** Timestamp original de la captura a partir de la cual se inferió la pose actual. */
   poseTimestamp: number | null;
   poseInferenceMs: number;
   /**
@@ -65,14 +65,19 @@ export interface VisionFrame {
   hands?: HandObservation[];
 }
 
-export interface HandTrackerStatus {
+export interface TrackerStatus {
   state: 'off' | 'loading' | 'ready' | 'error';
-  segmentation: boolean;
   fps: number;
   inferenceMs: number;
-  hands: number;
   lastError: string;
 }
+
+export interface HandTrackerStatus extends TrackerStatus {
+  segmentation: boolean;
+  hands: number;
+}
+
+export type PoseTrackerStatus = TrackerStatus;
 
 export type CameraStatus =
   | 'idle'
@@ -114,12 +119,13 @@ export interface VisionStatus {
   fallbackReason: string;
   cameraFps: number;
   cameraInfo: CameraDiagnostics;
+  pose: PoseTrackerStatus;
   hands: HandTrackerStatus;
 }
 
 export interface VisionSource {
   readonly status: VisionStatus;
-  /** performance.now() del último resultado recibido. */
+  /** performance.now() del último resultado recibido del pipeline de BODY. */
   readonly lastFrameAt: number;
   /** Sólo para el panel de debug. */
   readonly debugVideo: HTMLVideoElement | null;
@@ -153,6 +159,7 @@ export function createVisionStatus(): VisionStatus {
       deliveredFps: 0,
       aspectRatio: 0,
     },
+    pose: { state: 'off', fps: 0, inferenceMs: 0, lastError: '' },
     hands: { state: 'off', segmentation: false, fps: 0, inferenceMs: 0, hands: 0, lastError: '' },
   };
 }

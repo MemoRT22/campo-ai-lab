@@ -1,18 +1,14 @@
 import { MaskProcessor } from './MaskProcessor';
 import { PersonSegmenter } from './PersonSegmenter';
-import { PoseLandmarkerRunner } from './PoseLandmarkerRunner';
 import type { FrameMessage, FromWorker, InitMessage, ToWorker } from './protocol';
-import type { PersonInfo, PoseInfo } from './types';
+import type { PersonInfo } from './types';
 
 // Todo lo que toca píxeles de la cámara vive aquí. Los frames se cierran al terminar;
 // sólo salen la máscara, cajas y landmarks transitorios: ninguna imagen se conserva.
 
 const segmenter = new PersonSegmenter();
-const poseLandmarker = new PoseLandmarkerRunner();
 let processor: MaskProcessor | null = null;
 let ready = false;
-let poseIntervalMs = 1000 / 15;
-let lastPoseAt = -Infinity;
 
 function post(message: FromWorker, transfer: Transferable[] = []): void {
   self.postMessage(message, { transfer });
@@ -26,8 +22,6 @@ async function init(message: InitMessage): Promise<void> {
   try {
     processor = new MaskProcessor(message.settings);
     await segmenter.init(message.wasmBaseUrl, message.modelUrl, message.delegate);
-    await poseLandmarker.init(message.poseWasmBaseUrl, message.poseModelUrl, message.delegate, message.visionSettings);
-    poseIntervalMs = 1000 / message.visionSettings.poseFPS;
     ready = true;
     post({ type: 'ready', delegate: segmenter.delegate, labels: segmenter.labels });
   } catch (error) {
@@ -64,21 +58,11 @@ function handleFrame(message: FrameMessage): void {
       });
       const { personMap, confidenceMap } = output;
       if (personMap && confidenceMap) {
-        let poses: PoseInfo[] = [];
-        let poseTimestamp: number | null = null;
-        let poseInferenceMs = 0;
-        if (timestamp - lastPoseAt >= poseIntervalMs - 1) {
-          const poseStarted = performance.now();
-          poses = poseLandmarker.detect(bitmap, timestamp);
-          poseInferenceMs = performance.now() - poseStarted;
-          poseTimestamp = timestamp;
-          lastPoseAt = timestamp;
-        }
         produced = true;
         const personMapBuffer = personMap.buffer as ArrayBuffer;
         const confidenceBuffer = confidenceMap.buffer as ArrayBuffer;
         post(
-          { type: 'result', inputWidth, inputHeight, width, height, personMap: personMapBuffer, confidenceMap: confidenceBuffer, people, timestamp, inferenceMs, processingMs, poses, poseTimestamp, poseInferenceMs },
+          { type: 'result', inputWidth, inputHeight, width, height, personMap: personMapBuffer, confidenceMap: confidenceBuffer, people, timestamp, inferenceMs, processingMs },
           [personMapBuffer, confidenceBuffer],
         );
       }

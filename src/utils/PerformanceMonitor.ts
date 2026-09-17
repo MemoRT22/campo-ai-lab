@@ -12,6 +12,7 @@ export class PerformanceMonitor {
   maskProcessingMs = 0;
   /** Desde la captura del frame de cámara hasta que llega el resultado al hilo principal. */
   visionLatencyMs = 0;
+  poseLatencyMs = 0;
 
   private frames = 0;
   private visionFrames = 0;
@@ -46,8 +47,10 @@ export class PerformanceMonitor {
     this.visionLatencyMs += (now - captureTime - this.visionLatencyMs) * EMA;
   }
 
-  recordPose(inferenceMs: number): void {
+  recordPose(inferenceMs: number, captureTime: number, now: number): void {
     this.poseFrames++;
     this.poseInferenceMs += (inferenceMs - this.poseInferenceMs) * EMA;
+    this.poseLatencyMs += (now - captureTime - this.poseLatencyMs) * EMA;
   }
 }
+

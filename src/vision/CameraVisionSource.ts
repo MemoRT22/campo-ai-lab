@@ -1,6 +1,7 @@
 import type { Config } from '../config';
 import { CameraManager } from './CameraManager';
 import { HandTracker } from './HandTracker';
+import { PoseTracker } from './PoseTracker';
 import { maskSettingsFrom } from './MaskProcessor';
 import type { FrameMessage, FromWorker, InitMessage } from './protocol';
 import { createVisionStatus, type VisionFrame, type VisionSource } from './types';
@@ -16,8 +17,8 @@ export class CameraVisionSource implements VisionSource {
   lastFrameAt = 0;
 
   private readonly camera: CameraManager;
+  private readonly pose: PoseTracker;
   private readonly hands: HandTracker;
-  private latestPoses: VisionFrame['poses'] = [];
   private worker: Worker | null = null;
   private workerReady = false;
   private workerRetryAt = 0;
@@ -49,6 +50,7 @@ export class CameraVisionSource implements VisionSource {
   constructor(private readonly config: Config) {
     this.recovery = new WorkerRecoveryPolicy(config.vision.delegate, config.vision.runtimeFailureThreshold, config.camera.retryDelaysMs);
     this.camera = new CameraManager(config.camera);
+    this.pose = new PoseTracker(config, this.camera.video, this.status.pose);
     this.hands = new HandTracker(config, this.camera.video, this.status.hands);
     this.camera.onStatusChange = () => {
       this.status.camera = this.camera.status;
@@ -67,12 +69,14 @@ export class CameraVisionSource implements VisionSource {
     this.running = true;
     this.camera.start();
     this.spawnWorker();
+    this.pose.start();
     this.hands.start();
   }
 
   stop(): void {
     this.running = false;
     this.hands.stop();
+    this.pose.stop();
     this.camera.stop();
     this.worker?.terminate();
     this.worker = null;
@@ -82,9 +86,11 @@ export class CameraVisionSource implements VisionSource {
 
   update(now: number): void {
     if (!this.running) return;
+
+    this.pose.update(now);
     // Las manos van por su cuenta: su ritmo y sus fallos no afectan a la segmentación del cuerpo.
-    this.hands.update(now, this.latestPoses, this.frame.people, this.frame.personMap, this.frame.width, this.frame.height);
-    this.frame.hands = this.hands.observations;
+    this.hands.update(now, this.pose.observations, this.frame.people, this.frame.personMap, this.frame.width, this.frame.height);
+
     if (!this.worker) {
       if (now >= this.workerRetryAt) this.spawnWorker();
       return;
@@ -106,6 +112,10 @@ export class CameraVisionSource implements VisionSource {
   takeFrame(): VisionFrame | null {
     if (!this.hasPending) return null;
     this.hasPending = false;
+    this.frame.poses = this.pose.observations;
+    this.frame.poseTimestamp = this.pose.timestamp;
+    this.frame.poseInferenceMs = this.pose.status.inferenceMs;
+    this.frame.hands = this.hands.observations;
     return this.frame;
   }
 
@@ -156,17 +166,13 @@ export class CameraVisionSource implements VisionSource {
     this.workerSpawnedAt = performance.now();
     this.inFlight = false;
 
-    const { vision } = this.config;
     const base = new URL(import.meta.env.BASE_URL, window.location.href);
     const init: InitMessage = {
       type: 'init',
-      wasmBaseUrl: new URL(vision.wasmPath, base).href.replace(/\/$/, ''),
-      poseWasmBaseUrl: new URL(vision.poseWasmPath, base).href.replace(/\/$/, ''),
-      modelUrl: new URL(vision.modelPath, base).href,
-      poseModelUrl: new URL(vision.poseModelPath, base).href,
+      wasmBaseUrl: new URL(this.config.vision.wasmPath, base).href.replace(/\/$/, ''),
+      modelUrl: new URL(this.config.vision.modelPath, base).href,
       delegate: this.recovery.delegate,
       settings: maskSettingsFrom(this.config),
-      visionSettings: vision,
     };
     worker.postMessage(init);
   }
@@ -202,7 +208,7 @@ export class CameraVisionSource implements VisionSource {
         this.status.delegate = message.delegate;
         this.status.worker = 'ready';
         this.status.labels = message.labels;
-        console.info(`[vision] Segmentación + Pose listas (${message.delegate}). Etiquetas: ${message.labels.join(', ') || '—'}`);
+        console.info(`[vision] Segmentación lista (${message.delegate}). Etiquetas: ${message.labels.join(', ') || '—'}`);
         break;
       case 'result': {
         this.inFlight = false;
@@ -223,10 +229,6 @@ export class CameraVisionSource implements VisionSource {
         frame.timestamp = message.timestamp;
         frame.inferenceMs = message.inferenceMs;
         frame.processingMs = message.processingMs;
-        frame.poses = message.poses;
-        if (message.poseTimestamp !== null) this.latestPoses = message.poses;
-        frame.poseTimestamp = message.poseTimestamp;
-        frame.poseInferenceMs = message.poseInferenceMs;
         this.hasPending = true;
         this.lastFrameAt = performance.now();
         break;

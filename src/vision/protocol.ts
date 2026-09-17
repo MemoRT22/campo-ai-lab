@@ -1,16 +1,13 @@
 import type { Delegate } from '../config';
 import type { MaskProcessorSettings } from './MaskProcessor';
-import type { PersonInfo, PoseInfo } from './types';
+import type { PersonInfo } from './types';
 
 export interface InitMessage {
   type: 'init';
   wasmBaseUrl: string;
   modelUrl: string;
-  poseModelUrl: string;
-  poseWasmBaseUrl: string;
   delegate: Delegate;
   settings: MaskProcessorSettings;
-  visionSettings: import('../config').Config['vision'];
 }
 
 export interface FrameMessage {
@@ -42,9 +39,6 @@ export interface ResultMessage {
   timestamp: number;
   inferenceMs: number;
   processingMs: number;
-  poses: PoseInfo[];
-  poseTimestamp: number | null;
-  poseInferenceMs: number;
 }
 
 export interface SkippedMessage {
