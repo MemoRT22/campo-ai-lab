@@ -1,6 +1,7 @@
 import type { Config } from '../config';
 import { clamp01, lerp, smoothstep } from '../utils/MathUtils';
 import { MaskProcessor, maskSettingsFrom } from './MaskProcessor';
+import type { HandObservation } from './handGeometry';
 import { createVisionStatus, type VisionFrame, type VisionSource } from './types';
 
 const WIDTH = 320;
@@ -118,6 +119,88 @@ function drawFigure(ctx: OffscreenCanvasRenderingContext2D, f: Figure): void {
   ctx.fill();
 }
 
+/** Largo de la palma y proporciones de los dedos respecto a la altura de la figura. */
+const PALM_OF_HEIGHT = 0.055;
+const FINGER_LENGTHS = [0.85, 0.95, 0.88, 0.7];
+const FINGER_SEGMENTS = [0.45, 0.3, 0.25];
+
+/**
+ * Mano sintética de 21 puntos al final de un brazo, como la entregaría el Hand Landmarker.
+ * Sólo sirve para desarrollar y calibrar los dedos sin cámara.
+ */
+function mockHand(cx: number, feet: number, h: number, angle: number, side: number, spread: number, timestamp: number): HandObservation {
+  const shoulderY = feet - h * 0.8 + h * 0.03;
+  const shoulderX = cx + side * h * 0.12;
+  const bend = angle > 1.2 ? -0.25 * side : 0.15 * side;
+  const elbowX = shoulderX + Math.sin(angle) * side * h * 0.17;
+  const elbowY = shoulderY + Math.cos(angle) * h * 0.17;
+  const wristX = elbowX + Math.sin(angle + bend) * side * h * 0.16;
+  const wristY = elbowY + Math.cos(angle + bend) * h * 0.16;
+  const length = Math.hypot(wristX - elbowX, wristY - elbowY) || 1;
+  const dirX = (wristX - elbowX) / length;
+  const dirY = (wristY - elbowY) / length;
+  const perpX = -dirY;
+  const perpY = dirX;
+  const palm = h * PALM_OF_HEIGHT;
+  const width = palm * 0.8;
+
+  const points = new Float32Array(42);
+  const put = (index: number, x: number, y: number) => {
+    points[index * 2] = x / WIDTH;
+    points[index * 2 + 1] = y / HEIGHT;
+  };
+  put(0, wristX, wristY);
+  // Pulgar: sale del lateral de la palma, más abierto que los dedos.
+  const thumbAngle = 1.0 + spread * 0.6;
+  let tx = wristX + dirX * palm * 0.25 + perpX * width * 0.42;
+  let ty = wristY + dirY * palm * 0.25 + perpY * width * 0.42;
+  put(1, tx, ty);
+  for (let s = 0; s < 3; s++) {
+    const a = thumbAngle * (1 - s * 0.15);
+    const segment = palm * [0.35, 0.3, 0.25][s];
+    tx += (dirX * Math.cos(a) + perpX * Math.sin(a)) * segment;
+    ty += (dirY * Math.cos(a) + perpY * Math.sin(a)) * segment;
+    put(2 + s, tx, ty);
+  }
+  // Índice, medio, anular y meñique, abiertos en abanico.
+  const offsets = [0.38, 0.13, -0.13, -0.38];
+  for (let f = 0; f < 4; f++) {
+    const knuckleX = wristX + dirX * palm + perpX * width * offsets[f];
+    const knuckleY = wristY + dirY * palm + perpY * width * offsets[f];
+    put(5 + f * 4, knuckleX, knuckleY);
+    const fan = spread * offsets[f] * 2.2;
+    let px = knuckleX;
+    let py = knuckleY;
+    for (let s = 0; s < 3; s++) {
+      const segment = palm * FINGER_LENGTHS[f] * FINGER_SEGMENTS[s];
+      px += (dirX * Math.cos(fan) + perpX * Math.sin(fan)) * segment;
+      py += (dirY * Math.cos(fan) + perpY * Math.sin(fan)) * segment;
+      put(6 + f * 4 + s, px, py);
+    }
+  }
+
+  let minX = 1;
+  let minY = 1;
+  let maxX = 0;
+  let maxY = 0;
+  for (let k = 0; k < 21; k++) {
+    minX = Math.min(minX, points[k * 2]);
+    maxX = Math.max(maxX, points[k * 2]);
+    minY = Math.min(minY, points[k * 2 + 1]);
+    maxY = Math.max(maxY, points[k * 2 + 1]);
+  }
+  return {
+    personId: -1,
+    timestamp,
+    landmarks: points,
+    score: 1,
+    roi: { x: minX, y: minY, width: Math.max(0.01, maxX - minX), height: Math.max(0.01, maxY - minY) },
+    mask: null,
+    maskWidth: 0,
+    maskHeight: 0,
+  };
+}
+
 /**
  * Siluetas sintéticas en el espacio de la cámara, procesadas con el mismo MaskProcessor
  * que la ruta real. Sirve para afinar partículas y transiciones sin cámara ni voluntarios.
@@ -157,6 +240,7 @@ export class MockVisionSource implements VisionSource {
       poses: [],
       poseTimestamp: null,
       poseInferenceMs: 0,
+      hands: [],
     };
     this.status.camera = 'live';
     this.status.cameraDetail = 'Fuente sintética (mock)';
@@ -193,6 +277,18 @@ export class MockVisionSource implements VisionSource {
     const pixels = ctx.getImageData(0, 0, WIDTH, HEIGHT).data;
     const confidence = this.confidence;
     for (let i = 0; i < confidence.length; i++) confidence[i] = pixels[i * 4] / 255;
+
+    const spread = 0.12 + 0.16 * (0.5 + 0.5 * Math.sin(this.clock * 0.0022));
+    const hands: HandObservation[] = [];
+    for (const figure of [a, b, c]) {
+      if (!figure || !this.config.hands.enabled) continue;
+      const height = figure.height * HEIGHT;
+      const cx = figure.x * WIDTH;
+      const feet = figure.feet * HEIGHT;
+      hands.push(mockHand(cx, feet, height, figure.armLeft, -1, spread, now));
+      hands.push(mockHand(cx, feet, height, figure.armRight, 1, spread, now));
+    }
+    this.frame.hands = hands;
 
     const started = performance.now();
     this.frame.people = this.processor.process(confidence, WIDTH, HEIGHT, now, this.frame.personMap, this.frame.confidenceMap);

@@ -1,5 +1,6 @@
 import type { Config } from '../config';
 import { CameraManager } from './CameraManager';
+import { HandTracker } from './HandTracker';
 import { maskSettingsFrom } from './MaskProcessor';
 import type { FrameMessage, FromWorker, InitMessage } from './protocol';
 import { createVisionStatus, type VisionFrame, type VisionSource } from './types';
@@ -15,6 +16,8 @@ export class CameraVisionSource implements VisionSource {
   lastFrameAt = 0;
 
   private readonly camera: CameraManager;
+  private readonly hands: HandTracker;
+  private latestPoses: VisionFrame['poses'] = [];
   private worker: Worker | null = null;
   private workerReady = false;
   private workerRetryAt = 0;
@@ -40,11 +43,13 @@ export class CameraVisionSource implements VisionSource {
     poses: [],
     poseTimestamp: null,
     poseInferenceMs: 0,
+    hands: [],
   };
 
   constructor(private readonly config: Config) {
     this.recovery = new WorkerRecoveryPolicy(config.vision.delegate, config.vision.runtimeFailureThreshold, config.camera.retryDelaysMs);
     this.camera = new CameraManager(config.camera);
+    this.hands = new HandTracker(config, this.camera.video, this.status.hands);
     this.camera.onStatusChange = () => {
       this.status.camera = this.camera.status;
       this.status.cameraDetail = this.camera.detail;
@@ -61,10 +66,12 @@ export class CameraVisionSource implements VisionSource {
     this.running = true;
     this.camera.start();
     this.spawnWorker();
+    this.hands.start();
   }
 
   stop(): void {
     this.running = false;
+    this.hands.stop();
     this.camera.stop();
     this.worker?.terminate();
     this.worker = null;
@@ -74,6 +81,9 @@ export class CameraVisionSource implements VisionSource {
 
   update(now: number): void {
     if (!this.running) return;
+    // Las manos van por su cuenta: su ritmo y sus fallos no afectan a la segmentación del cuerpo.
+    this.hands.update(now, this.latestPoses, this.frame.people, this.frame.personMap, this.frame.width, this.frame.height);
+    this.frame.hands = this.hands.observations;
     if (!this.worker) {
       if (now >= this.workerRetryAt) this.spawnWorker();
       return;
@@ -211,6 +221,7 @@ export class CameraVisionSource implements VisionSource {
         frame.inferenceMs = message.inferenceMs;
         frame.processingMs = message.processingMs;
         frame.poses = message.poses;
+        if (message.poseTimestamp !== null) this.latestPoses = message.poses;
         frame.poseTimestamp = message.poseTimestamp;
         frame.poseInferenceMs = message.poseInferenceMs;
         this.hasPending = true;

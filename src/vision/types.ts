@@ -1,4 +1,5 @@
 import type { Delegate } from '../config';
+import type { HandObservation } from './handGeometry';
 
 /**
  * Una silueta detectada en el frame actual. No contiene identidad: `id` sólo asocia
@@ -54,6 +55,20 @@ export interface VisionFrame {
   /** null cuando este resultado sólo ejecutó segmentación. */
   poseTimestamp: number | null;
   poseInferenceMs: number;
+  /**
+   * Manos analizadas en alta resolución, con su propio reloj: llegan a otro ritmo que la máscara y
+   * cada una caduca sola. Vacío si el análisis de manos está apagado o no ve ninguna.
+   */
+  hands?: HandObservation[];
+}
+
+export interface HandTrackerStatus {
+  state: 'off' | 'loading' | 'ready' | 'error';
+  segmentation: boolean;
+  fps: number;
+  inferenceMs: number;
+  hands: number;
+  lastError: string;
 }
 
 export type CameraStatus =
@@ -82,6 +97,7 @@ export interface VisionStatus {
   consecutiveFailures: number;
   fallbackReason: string;
   cameraFps: number;
+  hands: HandTrackerStatus;
 }
 
 export interface VisionSource {
@@ -109,5 +125,6 @@ export function createVisionStatus(): VisionStatus {
     consecutiveFailures: 0,
     fallbackReason: '',
     cameraFps: 0,
+    hands: { state: 'off', segmentation: false, fps: 0, inferenceMs: 0, hands: 0, lastError: '' },
   };
 }

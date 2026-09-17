@@ -21,6 +21,11 @@ const SLOT_TONES = [
   [220, 180, 160],
 ];
 
+const HAND_CONNECTIONS = [
+  [0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [5, 9], [9, 10], [10, 11], [11, 12],
+  [9, 13], [13, 14], [14, 15], [15, 16], [13, 17], [17, 18], [18, 19], [19, 20], [0, 17],
+] as const;
+
 const POSE_CONNECTIONS = [
   [11, 12], [11, 13], [13, 15], [12, 14], [14, 16], [11, 23], [12, 24], [23, 24],
   [23, 25], [25, 27], [24, 26], [26, 28], [15, 17], [15, 19], [16, 18], [16, 20],
@@ -124,6 +129,33 @@ export class DebugPanel {
       g.fillStyle = '#ff3b30';
       g.fillText(`#${person.id} ${proximityLabel(person.proximity)} ${person.proximity.toFixed(2)}`, left + 2, Math.max(9, top - 2));
     }
+    for (const hand of frame.hands ?? []) {
+      const at = (index: number) => ({
+        x: (mirror ? 1 - hand.landmarks[index * 2] : hand.landmarks[index * 2]) * width,
+        y: hand.landmarks[index * 2 + 1] * height,
+      });
+      g.strokeStyle = '#30d158';
+      g.setLineDash([2, 2]);
+      const roiLeft = (mirror ? 1 - hand.roi.x - hand.roi.width : hand.roi.x) * width;
+      g.strokeRect(roiLeft + 0.5, hand.roi.y * height + 0.5, hand.roi.width * width, hand.roi.height * height);
+      g.setLineDash([]);
+      if (hand.landmarks.length < 42) continue;
+      for (const [from, to] of HAND_CONNECTIONS) {
+        const a = at(from);
+        const b = at(to);
+        g.beginPath();
+        g.moveTo(a.x, a.y);
+        g.lineTo(b.x, b.y);
+        g.stroke();
+      }
+      g.fillStyle = '#30d158';
+      for (let k = 0; k < 21; k++) {
+        const point = at(k);
+        g.beginPath();
+        g.arc(point.x, point.y, 1.1, 0, Math.PI * 2);
+        g.fill();
+      }
+    }
     if (frame.poseTimestamp !== null) this.latestPoses = frame.poses;
     for (const pose of this.latestPoses) {
       g.strokeStyle = '#64d2ff';
@@ -167,6 +199,7 @@ export class DebugPanel {
       `cámara      ${status.cameraFps.toFixed(1)} fps · ${status.camera}${status.cameraDetail ? ` · ${status.cameraDetail}` : ''}`,
       `segmentación ${perf.segmentationFps.toFixed(1)} fps · ${perf.inferenceMs.toFixed(1)} ms`,
       `pose        ${perf.poseFps.toFixed(1)} fps · ${perf.poseInferenceMs.toFixed(1)} ms`,
+      `manos       ${status.hands.state}${status.hands.segmentation ? ' + segmentación' : ''} · ${status.hands.fps.toFixed(1)} fps · ${status.hands.inferenceMs.toFixed(1)} ms · ${field.handsApplied}/${status.hands.hands} en silueta · ${field.handCells} celdas${status.hands.lastError ? ` · ${summarize(status.hands.lastError)}` : ''}`,
       `máscara     ${perf.maskProcessingMs.toFixed(1)} ms`,
       `pipeline    ${perf.visionLatencyMs.toFixed(0)} ms (captura → resultado; no motion-to-photon)`,
       `partículas  ${particles.renderCount} visibles · ${particles.bodyCount} cuerpo · ${particles.ambientCount} ambiente · ${particles.dormantCount} pool`,

@@ -1,5 +1,6 @@
 import type { Config } from '../config';
 import { clamp01, createRandom, expAlpha, lerp, screenScale, smoothstep } from '../utils/MathUtils';
+import { HandShape, MAX_HANDS, handAnchor, sampleUint8, type HandObservation } from '../vision/handGeometry';
 import type { PersonInfo, VisionFrame } from '../vision/types';
 
 const BAYER_4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
@@ -68,6 +69,9 @@ export class TargetField {
   /** Desplazamiento (px CSS) de cada celda de borde hacia el contorno subpíxel; 0 en el interior. */
   cellOffsetX = new Float32Array(0);
   cellOffsetY = new Float32Array(0);
+  /** Manos aplicadas y celdas que gobiernan en el último frame (diagnóstico). */
+  handsApplied = 0;
+  handCells = 0;
   /** Track temporal dueño de cada celda activa; -1 para fondo. No es identidad persistente. */
   cellPersonId = new Int32Array(0);
   /** Celdas activas en orden aleatorio estable (evita sesgos de barrido al asignar). */
@@ -121,6 +125,17 @@ export class TargetField {
   private rowToMaskF = new Float32Array(0);
   /** Histéresis por celda del contorno subpíxel. */
   private cellOn = new Uint8Array(0);
+  /** Mano que gobierna cada celda (índice en el análisis del frame); -1 si manda la máscara general. */
+  private cellHand = new Int8Array(0);
+  private readonly handShapes = Array.from({ length: MAX_HANDS }, () => new HandShape());
+  private readonly handObservations: (HandObservation | null)[] = new Array(MAX_HANDS).fill(null);
+  private readonly handWeight = new Float32Array(MAX_HANDS);
+  private readonly handReach = new Float32Array(MAX_HANDS);
+  private readonly handFeather = new Float32Array(MAX_HANDS);
+  private readonly handGate = new Float32Array(MAX_HANDS);
+  private readonly handHasShape = new Uint8Array(MAX_HANDS);
+  private handSoft = 1;
+  private handCount = 0;
   /** Px CSS de pantalla por px de máscara (con signo del espejo en X). */
   private screenPerMaskX = 1;
   private screenPerMaskY = 1;
@@ -191,6 +206,7 @@ export class TargetField {
     this.cellOffsetX = new Float32Array(n);
     this.cellOffsetY = new Float32Array(n);
     this.cellOn = new Uint8Array(n);
+    this.cellHand = new Int8Array(n).fill(-1);
     this.cellPersonId = new Int32Array(n).fill(-1);
     this.activeList = new Int32Array(n);
     this.rank = new Float32Array(n);
@@ -277,6 +293,7 @@ export class TargetField {
     const confidence = frame.confidenceMap;
     if (confidence && confidence.length === map.length && frame.width > 1 && frame.height > 1) {
       this.sampleContour(frame, confidence);
+      this.applyHands(frame, confidence, now);
     } else for (let r = 0; r < rows; r++) {
       const my = rowToMask[r];
       const rowStart = r * cols;
@@ -353,7 +370,10 @@ export class TargetField {
       activeList[count++] = i;
       cellProximity[i] = slotProximity[slot];
       cellEdge[i] = edge ? 1 : 0;
-      if (edge && snapContour && confidence) this.snapToContour(i, c, r, frame.width, frame.height, confidence);
+      if (edge && snapContour && confidence) {
+        if (this.cellHand[i] >= 0) this.snapToHand(i, c, r, frame.width, frame.height, confidence);
+        else this.snapToContour(i, c, r, frame.width, frame.height, confidence);
+      }
       else {
         cellOffsetX[i] = 0;
         cellOffsetY[i] = 0;
@@ -365,6 +385,9 @@ export class TargetField {
   clear(): void {
     this.active.fill(0);
     this.cellOn.fill(0);
+    this.cellHand.fill(-1);
+    this.handsApplied = 0;
+    this.handCells = 0;
     this.activeCount = 0;
     this.peopleCount = 0;
     this.pendingCount = 0;
@@ -648,6 +671,184 @@ export class TargetField {
         slotSumY[slot] += cellY[i];
       }
     }
+  }
+
+  /**
+   * Sustituye la máscara general por la mano analizada en alta resolución, sólo cerca de los dedos.
+   * Ahí la forma viene de los 21 puntos y de la segmentación del recorte; más allá (antebrazo, cuerpo)
+   * la máscara general sigue mandando, así que la mano nunca se separa del brazo.
+   */
+  private applyHands(frame: VisionFrame, confidence: Uint8Array, now: number): void {
+    const settings = this.config.hands;
+    this.cellHand.fill(-1);
+    this.handsApplied = 0;
+    this.handCells = 0;
+    this.handCount = 0;
+    const observations = frame.hands;
+    if (!settings.enabled || !observations || observations.length === 0) return;
+
+    const maskWidth = frame.width;
+    const maskHeight = frame.height;
+    const { contourThreshold, contourHysteresis } = this.config.particles.silhouette;
+    const holdLevel = Math.max(0, contourThreshold - contourHysteresis);
+    // Un dedo no puede ser más fino que la retícula, o no se vería.
+    const spacingInMask = this.spacing / Math.max(1e-6, Math.abs(this.screenPerMaskX));
+    const minRadius = Math.max(0.05, settings.minFingerWidthCells * spacingInMask * 0.5);
+    this.handSoft = Math.max(0.15, spacingInMask * 0.5);
+    const { cols, rows, colToMaskF, rowToMaskF, cellPerson, cellOn, cellX, cellY, slotCount, slotSumX, slotSumY } = this;
+
+    for (const hand of observations) {
+      if (this.handCount >= MAX_HANDS) break;
+      const weight = 1 - smoothstep(settings.fadeStartMs, settings.maxAgeMs, now - hand.timestamp);
+      if (weight <= 0.01) continue;
+      const slot = this.slotForHand(hand, frame, maskWidth, maskHeight);
+      if (slot < 0) continue;
+
+      const h = this.handCount;
+      const shape = this.handShapes[h];
+      const hasShape = hand.landmarks.length >= 42 && shape.prepare(hand.landmarks, maskWidth, maskHeight, settings, minRadius);
+      const hasMask = hand.mask !== null && hand.maskWidth > 1 && hand.mask.length === hand.maskWidth * hand.maskHeight;
+      if (!hasShape && !hasMask) continue;
+
+      this.handObservations[h] = hand;
+      this.handHasShape[h] = hasShape ? 1 : 0;
+      this.handWeight[h] = weight * (hasShape ? 1 : settings.segmentationOnlyWeight);
+      this.handReach[h] = hasShape ? settings.patchReach * shape.palmLength : 0;
+      this.handFeather[h] = hasShape ? Math.max(0.1, settings.patchFeather * shape.palmLength) : 0;
+      this.handGate[h] = hasShape ? (settings.segmentationGate - 1) * shape.fingerRadius : 0;
+
+      const margin = this.handReach[h] + this.handFeather[h] + this.handSoft;
+      const x0 = hasShape ? shape.minX - margin : hand.roi.x * maskWidth;
+      const x1 = hasShape ? shape.maxX + margin : (hand.roi.x + hand.roi.width) * maskWidth;
+      const y0 = hasShape ? shape.minY - margin : hand.roi.y * maskHeight;
+      const y1 = hasShape ? shape.maxY + margin : (hand.roi.y + hand.roi.height) * maskHeight;
+      this.handCount++;
+      this.handsApplied++;
+
+      for (let r = 0; r < rows; r++) {
+        const my = rowToMaskF[r];
+        if (my < y0 || my > y1) continue;
+        const rowStart = r * cols;
+        for (let c = 0; c < cols; c++) {
+          const mx = colToMaskF[c];
+          if (mx < x0 || mx > x1) continue;
+          const i = rowStart + c;
+          const value = this.evaluateHand(h, mx, my, confidence, maskWidth, maskHeight);
+          const previous = cellPerson[i];
+          const on = value >= (cellOn[i] === 1 ? holdLevel : contourThreshold);
+          const next = on ? slot : -1;
+          if (next !== previous) {
+            if (previous >= 0) {
+              slotCount[previous]--;
+              slotSumX[previous] -= cellX[i];
+              slotSumY[previous] -= cellY[i];
+            }
+            if (next >= 0) {
+              slotCount[next]++;
+              slotSumX[next] += cellX[i];
+              slotSumY[next] += cellY[i];
+            }
+            cellPerson[i] = next;
+          }
+          cellOn[i] = on ? 1 : 0;
+          this.cellHand[i] = h;
+          this.handCells++;
+        }
+      }
+    }
+  }
+
+  /**
+   * Confianza combinada en un punto (px de máscara): la mano pesa junto a los dedos y se desvanece
+   * hacia el resto del cuerpo. Con landmarks, la segmentación del recorte sólo cuenta cerca del
+   * esqueleto, así que una mancha del fondo no engorda la mano.
+   */
+  private evaluateHand(h: number, mx: number, my: number, confidence: Uint8Array, maskWidth: number, maskHeight: number): number {
+    const coarse = sampleUint8(confidence, maskWidth, maskHeight, mx, my);
+    const hand = this.handObservations[h];
+    if (!hand) return coarse;
+    const soft = this.handSoft;
+
+    if (this.handHasShape[h] === 1) {
+      const shape = this.handShapes[h];
+      const local = 1 - smoothstep(this.handReach[h], this.handReach[h] + this.handFeather[h], shape.fingerDistance(mx, my));
+      if (local <= 0) return coarse;
+      const distance = shape.signedDistance(mx, my);
+      let value = clamp01(0.5 - distance / soft);
+      if (hand.mask) {
+        const gate = clamp01(0.5 - (distance - this.handGate[h]) / soft);
+        value = Math.max(value, this.sampleHandMask(hand, mx, my, maskWidth, maskHeight) * gate);
+      }
+      return coarse + (value - coarse) * (this.handWeight[h] * local);
+    }
+
+    // Sin landmarks sólo hay recorte segmentado: manda en el centro y se funde en sus bordes.
+    const u = (mx / maskWidth - hand.roi.x) / hand.roi.width;
+    const v = (my / maskHeight - hand.roi.y) / hand.roi.height;
+    const fade = Math.min(smoothstep(0, 0.18, u) * smoothstep(0, 0.18, 1 - u), smoothstep(0, 0.18, v) * smoothstep(0, 0.18, 1 - v));
+    if (fade <= 0) return coarse;
+    const seg = this.sampleHandMask(hand, mx, my, maskWidth, maskHeight);
+    return coarse + (seg - coarse) * (this.handWeight[h] * fade);
+  }
+
+  private sampleHandMask(hand: HandObservation, mx: number, my: number, maskWidth: number, maskHeight: number): number {
+    if (!hand.mask) return 0;
+    const u = (mx / maskWidth - hand.roi.x) / hand.roi.width;
+    const v = (my / maskHeight - hand.roi.y) / hand.roi.height;
+    if (u < 0 || u > 1 || v < 0 || v > 1) return 0;
+    return sampleUint8(hand.mask, hand.maskWidth, hand.maskHeight, u * hand.maskWidth, v * hand.maskHeight);
+  }
+
+  /** Silueta dueña de una mano: su personId si llegó asociado, o la etiqueta de la máscara en la muñeca. */
+  private slotForHand(hand: HandObservation, frame: VisionFrame, maskWidth: number, maskHeight: number): number {
+    if (hand.personId >= 0) {
+      for (let s = 0; s < this.slotPersonId.length; s++) {
+        if (this.slotPersonId[s] === hand.personId && this.slotKeep[s] > 0) return s;
+      }
+      return -1;
+    }
+    const anchor = handAnchor(hand);
+    const mx = Math.min(maskWidth - 1, Math.max(0, Math.round(anchor.x * maskWidth)));
+    const my = Math.min(maskHeight - 1, Math.max(0, Math.round(anchor.y * maskHeight)));
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const sx = mx + dx;
+        const sy = my + dy;
+        if (sx < 0 || sy < 0 || sx >= maskWidth || sy >= maskHeight) continue;
+        const slot = frame.personMap[sy * maskWidth + sx] - 1;
+        if (slot >= 0 && this.slotKeep[slot] > 0) return slot;
+      }
+    }
+    return -1;
+  }
+
+  /** Igual que snapToContour, pero sobre la confianza combinada con la mano (gradiente numérico). */
+  private snapToHand(i: number, c: number, r: number, maskWidth: number, maskHeight: number, confidence: Uint8Array): void {
+    const h = this.cellHand[i];
+    const { contourThreshold, edgeSnap, maxSnap } = this.config.particles.silhouette;
+    const mx = this.colToMaskF[c];
+    const my = this.rowToMaskF[r];
+    const step = Math.max(0.05, this.handSoft * 0.5);
+    const value = this.evaluateHand(h, mx, my, confidence, maskWidth, maskHeight);
+    const gx = (this.evaluateHand(h, mx + step, my, confidence, maskWidth, maskHeight) - value) / step;
+    const gy = (this.evaluateHand(h, mx, my + step, confidence, maskWidth, maskHeight) - value) / step;
+    const gradientSq = gx * gx + gy * gy;
+    if (gradientSq < 1e-6) {
+      this.cellOffsetX[i] = 0;
+      this.cellOffsetY[i] = 0;
+      return;
+    }
+    const advance = ((contourThreshold - value) / gradientSq) * edgeSnap;
+    let ox = gx * advance * this.screenPerMaskX;
+    let oy = gy * advance * this.screenPerMaskY;
+    const limit = maxSnap * this.spacing;
+    const distance = Math.hypot(ox, oy);
+    if (distance > limit) {
+      ox *= limit / distance;
+      oy *= limit / distance;
+    }
+    this.cellOffsetX[i] = ox;
+    this.cellOffsetY[i] = oy;
   }
 
   /**

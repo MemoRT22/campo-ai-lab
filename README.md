@@ -72,6 +72,7 @@ Todo vive en [`src/config.ts`](src/config.ts). No hay números mágicos repartid
 | --- | --- |
 | `camera` | Resolución, cámara, espejo, encuadre (`cover`/`contain`), recorte útil (`crop`), reintentos |
 | `vision` | FPS independientes de segmentación/Pose, ancho, delegado GPU/CPU, umbrales, suavizado, área mínima, `maxPeople`, watchdog y fallback |
+| `hands` | Dedos: modelo, ritmo, recortes guiados por Pose, grosor de dedos, mezcla con la máscara general y caducidad |
 | `gestures` | Visibilidad, margen, suavizado, histéresis, tiempos mínimos y gracia de ausencia |
 | `proximity` | Qué tamaño aparente cuenta como lejos o cerca |
 | `particles` | Pool y densidad; fases de movimiento (formación, tracking, movimiento rápido, departure); predicción e interpolación; presencia magnética; idle; onda de mano; reveal y vuelo de partículas al texto y a la marca. Subsecciones `formationWow`, `livingBody` y `groupInteraction` |
@@ -115,6 +116,20 @@ La forma de cada persona sigue el contorno real de la máscara, no una cuadrícu
 | Tres personas: JS de simulación por frame | ~2 ms | ~4.5 ms (+ ~1.1 ms de máscara → retícula en promedio) |
 
 En Chrome con `?mock=true` se midieron 3–4 ms de JS por frame con 1–3 personas. En equipos lentos se puede bajar el costo sin recompilar: `?particles.particleSpacing=6.5&particles.bodyParticleBudget=10000`. Si antes se guardó calibración con `?calibrate=true`, el `particleSpacing` guardado reemplaza el nuevo valor: usa *RESTABLECER* en el panel.
+
+### Dedos y manos
+
+La máscara general (320×180 para toda la escena) no tiene resolución para un dedo: a 2 m, un dedo mide menos de un píxel ahí y la mano sale como un bulto. Los dedos se resuelven aparte, en alta resolución:
+
+1. **Dónde mirar.** Pose da la muñeca de cada mano; de ahí sale un recorte 16:9 alrededor de ella (`roiPalmScale`, `roiShoulderScale`, acotado entre `roiMinPx` y `roiMaxPx`). Si ya hubo una mano hace poco, el encuadre lo dan sus 21 puntos (`roiHandScale`, `trackReuseMs`), que son más precisos que Pose.
+2. **Qué se analiza.** El recorte se toma del video a resolución completa y se escala a `cropWidth`×`cropHeight`. Sobre él corren **Hand Landmarker** (21 puntos) y, si `segmentation` está activo, el **mismo segmentador** de siluetas: la forma real de la mano.
+3. **Cómo se dibuja.** Los 21 puntos construyen cápsulas de dedos, pulgar, palma y antebrazo (`fingerRadius`, `thumbRadius`, `forearmRadius`). La segmentación del recorte sólo cuenta cerca de ese esqueleto (`segmentationGate`), así que una mancha del fondo no engorda la mano. Un dedo nunca es más fino que la retícula (`minFingerWidthCells`).
+4. **Dónde manda.** La mano reemplaza a la máscara general sólo alrededor de los dedos (`patchReach`, `patchFeather`); más allá —antebrazo, cuerpo— manda la máscara general, así que la mano nunca se separa del brazo. El contorno de los dedos también se ajusta con precisión subpíxel.
+5. **Nunca se congela.** Cada observación caduca sola entre `fadeStartMs` y `maxAgeMs`: si el análisis se atrasa o pierde la mano, los dedos se funden con la silueta en lugar de quedarse pegados donde estaban.
+
+**Aislado del cuerpo.** Todo esto vive en su propio worker (`hands.worker.ts`). Si se atrasa, falla o el equipo no da, la segmentación del cuerpo no pierde ni un frame; tras tres fallos seguidos los dedos se apagan por el resto de la sesión. `?hands.enabled=false` los desactiva.
+
+**Alcance real.** Los dedos dependen de cuántos píxeles de cámara ocupa la mano: con 1280×720 son nítidos hasta ~1.5 m, se degradan hacia ~2.5 m y más lejos el Hand Landmarker deja de encontrar la mano (entonces la silueta vuelve al bulto de siempre). Subir `camera.cameraWidth` a 1920 amplía ese rango a costa de captura.
 
 ### Mirror feel: fases de movimiento
 
@@ -275,7 +290,11 @@ src/
     PoseLandmarkerRunner.ts MediaPipe Pose Landmarker (mismo worker/frame)
     WorkerRecoveryPolicy.ts circuito GPU → CPU sin oscilación
     MaskProcessor.ts        limpieza de máscara y siluetas (código puro)
-    MockVisionSource.ts     siluetas sintéticas para desarrollo
+    HandTracker.ts          recortes de mano guiados por Pose y observaciones
+    hands.worker.ts         Hand Landmarker + segmentación del recorte (worker aparte)
+    handGeometry.ts         recortes, esqueleto de la mano y distancias (código puro)
+    handsProtocol.ts        contrato del worker de manos
+    MockVisionSource.ts     siluetas y manos sintéticas para desarrollo
     protocol.ts, types.ts   contratos
   particles/
     TargetField.ts          máscara + confianza → retícula estable con contorno subpíxel
@@ -324,7 +343,8 @@ Pérdidas breves de detección (menos de 900 ms) no cuentan como salida. Si la p
 ## Privacidad
 
 - **Qué se almacena: nada personal.** Ni frames, capturas, video, landmarks ni identificadores se escriben en almacenamiento. Cada imagen se cierra al terminar el frame.
-- **Qué sale del worker.** Un mapa de siluetas y su confianza (ambos de baja resolución, 320×180, sin imagen), cajas anónimas y landmarks transitorios para gesto/debug. No salen del navegador ni se persisten.
+- **Qué sale del worker.** Un mapa de siluetas y su confianza (ambos de baja resolución, 320×180, sin imagen), cajas anónimas y landmarks transitorios para gesto/debug.
+- **Manos.** Los recortes de mano se analizan en memoria y se cierran en el mismo frame; sólo salen 21 puntos y la confianza del recorte, sin imagen. No se guardan ni salen del navegador. No hay identificación biométrica: un punto de dedo no identifica a nadie y se descarta al perder la mano. No salen del navegador ni se persisten.
 - **Red.** No hay conexiones de red: el documento declara una CSP con `connect-src 'self'`, y el modelo y el runtime se sirven localmente.
 - **Reconocimiento facial.** No existe. Los ids de silueta sólo dan continuidad entre frames consecutivos y se descartan al perder a la persona.
 - **En producción** no se muestra ninguna imagen de cámara. El video sólo es visible con `?debug=true`.
@@ -334,6 +354,7 @@ Pérdidas breves de detección (menos de 900 ms) no cuentan como salida. Si la p
 - **Personas lejanas.** El segmentador de MediaPipe está entrenado para distancias de selfie y videollamada: más allá de ~3–4 m pierde definición.
 - **Personas juntas.** Dos personas que se tocan se funden en una silueta. Es segmentación semántica, no por instancias.
 - **Multipose.** Se solicitan hasta cuatro poses, pero el modelo lite puede perder personas lejanas, ocluidas o muy juntas; la máscara sigue siendo semántica y no se asigna como instancia perfecta.
+- **Dedos a distancia.** El Hand Landmarker necesita que la mano ocupe suficientes píxeles: más allá de ~2.5 m con 1280×720 deja de encontrarla y la mano vuelve a verse como un bulto. Los dedos dependen además de Pose: si no ve la muñeca, no hay recorte que analizar.
 - **Reflejos del vidrio.** Pueden generar siluetas falsas, sobre todo de noche. Se mitiga con `crop`, área mínima y la instalación física de la cámara (ver análisis).
 - **Tamaños de texto.** Están calibrados para laptop. En la pantalla real hay que subir `typography.scale`.
 - **Mediciones pendientes con cámara real.** Los tiempos de inferencia se midieron con frames sintéticos: falta confirmar la latencia completa cámara → partículas.
@@ -341,9 +362,9 @@ Pérdidas breves de detección (menos de 900 ms) no cuentan como salida. Si la p
 
 ## Verificación
 
-`npm test` (56 pruebas), `npm run typecheck` y `npm run build` validan lógica pura, contratos TypeScript y bundle de producción. Las pruebas cubren, entre otras cosas, la traslación de la silueta al caminar sin overshoot, la predicción ante brazos/frenado/giro, el departure escalonado, el reveal sin pérdida de tracking, la elección de espacio negativo, el lock de formación por persona, que la estela visual no altere el núcleo espejo, la histéresis y selección de pares del modo grupo, los presupuestos de partículas y la resonancia de gestos, el contorno subpíxel, la histéresis por celda y la protección del contorno ante el presupuesto. La medición motion-to-photon sigue siendo una prueba física externa con video de alta velocidad.
+`npm test` (70 pruebas), `npm run typecheck` y `npm run build` validan lógica pura, contratos TypeScript y bundle de producción. Las pruebas cubren, entre otras cosas, la traslación de la silueta al caminar sin overshoot, la predicción ante brazos/frenado/giro, el departure escalonado, el reveal sin pérdida de tracking, la elección de espacio negativo, el lock de formación por persona, que la estela visual no altere el núcleo espejo, la histéresis y selección de pares del modo grupo, los presupuestos de partículas y la resonancia de gestos, el contorno subpíxel, la histéresis por celda y la protección del contorno ante el presupuesto, la geometría de la mano y los recortes, y que los dedos abran los huecos sin desprenderse del brazo ni congelarse. La medición motion-to-photon sigue siendo una prueba física externa con video de alta velocidad.
 
 ## Créditos y licencias
 
-- **Runtime y modelos.** MediaPipe Tasks Vision, `selfie_segmenter_landscape` y `pose_landmarker_lite` de Google (Apache 2.0; ver sus model cards).
+- **Runtime y modelos.** MediaPipe Tasks Vision, `selfie_segmenter_landscape`, `pose_landmarker_lite` y `hand_landmarker` de Google (Apache 2.0; ver sus model cards). Los tres modelos se sirven localmente desde `public/models/`.
 - **Tipografías.** Geist y Geist Mono (SIL Open Font License), vía Fontsource.

@@ -82,6 +82,56 @@ export const defaultConfig = {
     runtimeFailureThreshold: 3,
   },
 
+  /**
+   * DEDOS — Hand Landmarker + segmentación sobre recortes de la cámara en alta resolución, guiados
+   * por Pose. La máscara general (320×180) no tiene resolución para un dedo; estos recortes sí.
+   * Corre en su propio worker: si se atrasa, la silueta del cuerpo no pierde ni un frame.
+   */
+  hands: {
+    enabled: true,
+    modelPath: 'models/hand_landmarker.task',
+    /** Frecuencia máxima del análisis; sólo corre cuando Pose ve una muñeca. */
+    fps: 20,
+    maxHands: 4,
+    /** Tamaño del recorte enviado a los modelos (16:9, como espera el segmentador landscape). */
+    cropWidth: 320,
+    cropHeight: 180,
+    /** Alto del recorte: múltiplo de la palma estimada por Pose y del ancho de hombros, acotado en px de cámara. */
+    roiPalmScale: 3.4,
+    roiShoulderScale: 0.9,
+    roiMinPx: 72,
+    roiMaxPx: 420,
+    /** Recorte guiado por los 21 puntos de la observación anterior, más preciso que Pose. */
+    roiHandScale: 1.9,
+    /** Tiempo durante el que una observación previa sirve para encuadrar la siguiente. */
+    trackReuseMs: 200,
+    minWristVisibility: 0.4,
+    detectionConfidence: 0.45,
+    presenceConfidence: 0.45,
+    trackingConfidence: 0.45,
+    /** Segmentar el recorte además de los landmarks: da el contorno real de la mano. */
+    segmentation: true,
+    /** Una observación pierde influencia entre estas edades y desaparece: los dedos nunca se congelan. */
+    fadeStartMs: 90,
+    maxAgeMs: 220,
+    /** Grosor de dedos, pulgar y antebrazo como fracción del largo de la palma (muñeca → nudillo medio). */
+    fingerRadius: 0.085,
+    thumbRadius: 0.105,
+    forearmRadius: 0.3,
+    forearmLength: 0.7,
+    /** Grosor mínimo de un dedo en celdas de la retícula: por debajo no se vería. */
+    minFingerWidthCells: 1.2,
+    /** La segmentación del recorte sólo cuenta dentro de este múltiplo del grosor del dedo (descarta manchas). */
+    segmentationGate: 1.35,
+    /** Zona alrededor de los dedos donde la mano reemplaza a la máscara general (fracción de la palma). */
+    patchReach: 0.35,
+    patchFeather: 0.35,
+    /** Peso de la segmentación cuando no hay landmarks (mano cerrada, muy lejos). */
+    segmentationOnlyWeight: 0.6,
+    workerTimeoutMs: 4000,
+    retryDelayMs: 6000,
+  },
+
   gestures: {
     minVisibility: 0.6,
     /** Distancia normalizada por encima del hombro para activar y para rearmar. */

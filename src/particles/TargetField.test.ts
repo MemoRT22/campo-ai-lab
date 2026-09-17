@@ -240,3 +240,112 @@ describe('TargetField silhouette detail', () => {
     for (let k = 0; k < field.activeCount; k++) expect(field.cellOffsetX[field.activeList[k]]).toBe(0);
   });
 });
+
+describe('TargetField dedos', () => {
+  const MW = 80;
+  const MH = 45;
+  /** La máscara general sólo ve un "mitón": un disco donde debería haber dedos, más el antebrazo. */
+  const mitten = (x: number, y: number) => (Math.hypot(x - 40, y - 23) < 5.5 || (x > 37 && x < 43 && y > 30) ? 1 : 0);
+
+  /** Mano abierta con cuatro dedos rectos separados 2.4 px de máscara. */
+  function openHand(): Float32Array {
+    const points = new Float32Array(42);
+    const put = (index: number, x: number, y: number) => {
+      points[index * 2] = x / MW;
+      points[index * 2 + 1] = y / MH;
+    };
+    put(0, 40, 30);
+    put(1, 43.5, 29);
+    put(2, 45.5, 27.5);
+    put(3, 47, 26);
+    put(4, 48.5, 24.5);
+    [36.4, 38.8, 41.2, 43.6].forEach((x, finger) => {
+      put(5 + finger * 4, x, 24);
+      put(6 + finger * 4, x, 21);
+      put(7 + finger * 4, x, 18);
+      put(8 + finger * 4, x, 15);
+    });
+    return points;
+  }
+
+  function handFrame(handTimestamp: number | null): VisionFrame {
+    const personMap = new Uint8Array(MW * MH);
+    const confidenceMap = new Uint8Array(MW * MH);
+    for (let y = 0; y < MH; y++) {
+      for (let x = 0; x < MW; x++) {
+        const value = mitten(x + 0.5, y + 0.5);
+        confidenceMap[y * MW + x] = Math.round(value * 255);
+        if (value > 0.4) personMap[y * MW + x] = 1;
+      }
+    }
+    const person: PersonInfo = { id: 4, slot: 0, x0: 0.4, y0: 0.3, x1: 0.62, y1: 1, cx: 0.5, cy: 0.6, area: 0.2, proximity: 0.5, confirmed: true };
+    return {
+      width: MW,
+      height: MH,
+      personMap,
+      confidenceMap,
+      people: [person],
+      hands: handTimestamp === null
+        ? []
+        : [{ personId: 4, timestamp: handTimestamp, landmarks: openHand(), score: 0.9, roi: { x: 0.4, y: 0.3, width: 0.2, height: 0.4 }, mask: null, maskWidth: 0, maskHeight: 0 }],
+      timestamp: 0,
+      inferenceMs: 0,
+      processingMs: 0,
+      poses: [],
+      poseTimestamp: null,
+      poseInferenceMs: 0,
+    };
+  }
+
+  function fieldWithHands(handTimestamp: number | null, now = 1000) {
+    const config = structuredClone(defaultConfig);
+    config.camera.mirror = false;
+    config.camera.fit = 'contain';
+    config.particles.particleDensity = { far: 1, close: 1 };
+    config.particles.bodyParticleBudget = 100000;
+    const field = new TargetField(config);
+    field.resize(800, 450);
+    field.update(handFrame(handTimestamp), now);
+    return field;
+  }
+
+  /** ¿Está encendida la celda más cercana a un punto de la máscara? */
+  function activeAt(field: TargetField, maskX: number, maskY: number): boolean {
+    let best = -1;
+    let bestDistance = Infinity;
+    for (let i = 0; i < field.cellCount; i++) {
+      const distance = Math.hypot(field.cellX[i] - maskX * 10, field.cellY[i] - maskY * 10);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = i;
+      }
+    }
+    return field.active[best] === 1;
+  }
+
+  it('abre los huecos entre dedos y dibuja las puntas fuera de la máscara general', () => {
+    const withHand = fieldWithHands(1000);
+    expect(withHand.handsApplied).toBe(1);
+    expect(withHand.handCells).toBeGreaterThan(0);
+    // Hueco entre el dedo medio y el anular: la máscara general lo daba por relleno.
+    expect(activeAt(withHand, 40, 21)).toBe(false);
+    // Punta del dedo medio: fuera del disco de la máscara general, pero es mano.
+    expect(activeAt(withHand, 38.8, 15.2)).toBe(true);
+    // El antebrazo sigue gobernado por la máscara general: la mano no se desprende del brazo.
+    expect(activeAt(withHand, 40, 34)).toBe(true);
+  });
+
+  it('sin manos la silueta queda como el mitón de la máscara general', () => {
+    const withoutHand = fieldWithHands(null);
+    expect(withoutHand.handsApplied).toBe(0);
+    expect(activeAt(withoutHand, 40, 21)).toBe(true);
+    expect(activeAt(withoutHand, 38.8, 15.2)).toBe(false);
+  });
+
+  it('una observación vieja deja de influir en vez de congelar los dedos', () => {
+    const stale = fieldWithHands(1000, 1000 + defaultConfig.hands.maxAgeMs + 50);
+    expect(stale.handsApplied).toBe(0);
+    expect(activeAt(stale, 40, 21)).toBe(true);
+    expect(activeAt(stale, 38.8, 15.2)).toBe(false);
+  });
+});

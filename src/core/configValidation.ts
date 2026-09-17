@@ -197,6 +197,33 @@ const NUMBER_RULES: Record<string, NumberRule> = {
   'layout.switchMargin': { min: 0, max: 1 },
   'layout.occupancySmoothingMs': { min: 0, max: 5000 },
   'layout.minSideAspect': { min: 0.5, max: 4 },
+  'hands.fps': { min: 1, max: 60 },
+  'hands.maxHands': { min: 1, max: 4, integer: true },
+  'hands.cropWidth': { min: 64, max: 1024, integer: true, fallback: true },
+  'hands.cropHeight': { min: 64, max: 1024, integer: true, fallback: true },
+  'hands.roiPalmScale': { min: 1, max: 10 },
+  'hands.roiShoulderScale': { min: 0, max: 5 },
+  'hands.roiMinPx': { min: 16, max: 2000 },
+  'hands.roiMaxPx': { min: 32, max: 4000 },
+  'hands.roiHandScale': { min: 1, max: 6 },
+  'hands.trackReuseMs': { min: 0, max: 2000 },
+  'hands.minWristVisibility': { min: 0, max: 1 },
+  'hands.detectionConfidence': { min: 0, max: 1 },
+  'hands.presenceConfidence': { min: 0, max: 1 },
+  'hands.trackingConfidence': { min: 0, max: 1 },
+  'hands.fadeStartMs': { min: 0, max: 5000 },
+  'hands.maxAgeMs': { min: 16, max: 5000 },
+  'hands.fingerRadius': { min: 0.01, max: 0.5 },
+  'hands.thumbRadius': { min: 0.01, max: 0.5 },
+  'hands.forearmRadius': { min: 0.01, max: 1 },
+  'hands.forearmLength': { min: 0, max: 3 },
+  'hands.minFingerWidthCells': { min: 0, max: 5 },
+  'hands.segmentationGate': { min: 1, max: 4 },
+  'hands.patchReach': { min: 0, max: 3 },
+  'hands.patchFeather': { min: 0.01, max: 3 },
+  'hands.segmentationOnlyWeight': { min: 0, max: 1 },
+  'hands.workerTimeoutMs': { min: 250, max: 60000 },
+  'hands.retryDelayMs': { min: 100, max: 120000 },
   'proximity.farSize': { min: 0, max: 1 },
   'proximity.closeSize': { min: 0, max: 2 },
   'experience.gestureCooldown': { min: 0, max: 10000 },
@@ -284,6 +311,11 @@ export function validateConfig(input: Config): Config {
     config.proximity.farSize = defaultConfig.proximity.farSize;
     config.proximity.closeSize = defaultConfig.proximity.closeSize;
   }
+  if (config.hands.roiMaxPx <= config.hands.roiMinPx) {
+    config.hands.roiMinPx = defaultConfig.hands.roiMinPx;
+    config.hands.roiMaxPx = defaultConfig.hands.roiMaxPx;
+  }
+  if (config.hands.maxAgeMs <= config.hands.fadeStartMs) config.hands.fadeStartMs = config.hands.maxAgeMs * 0.5;
   if (config.calibrationMode) config.debugMode = true;
   return config;
 }
