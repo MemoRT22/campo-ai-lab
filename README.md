@@ -72,8 +72,8 @@ Todo vive en [`src/config.ts`](src/config.ts). No hay números mágicos repartid
 | --- | --- |
 | `displayProfile` | Preset de salida `standard` o `large`; LARGE sólo aplica overrides puntuales sobre la misma arquitectura |
 | `camera` | Resolución, cámara, espejo, encuadre (`cover`/`contain`), recorte útil (`crop`), reintentos |
-| `vision` | FPS independientes de segmentación/Pose, ancho, delegado GPU/CPU, umbrales, suavizado, área mínima, `maxPeople`, watchdog y fallback |
-| `hands` | Dedos: modelo, ritmo, recortes guiados por Pose, grosor de dedos, mezcla con la máscara general y caducidad |
+| `vision` | FPS independientes de segmentación/Pose, ancho, `cropAtCapture`, delegado GPU/CPU, umbrales, suavizado, área mínima, `maxPeople`, watchdog y fallback |
+| `hands` | Dedos (apagados por defecto): modelo, ritmo, recortes guiados por Pose, grosor de dedos, mezcla con la máscara general y caducidad |
 | `gestures` | Visibilidad, margen, suavizado, histéresis, tiempos mínimos y gracia de ausencia |
 | `proximity` | Qué tamaño aparente cuenta como lejos o cerca |
 | `particles` | Pool y densidad; fases de movimiento (formación, tracking, movimiento rápido, departure); predicción e interpolación; presencia magnética; idle; onda de mano; reveal y vuelo de partículas al texto y a la marca. Subsecciones `formationWow`, `livingBody` y `groupInteraction` |
@@ -127,8 +127,8 @@ El mismo panel ofrece presets de solicitud 1280/1920/3840, 720/1080/2160 y 30/60
 
 | Grupo | LARGE | Intención |
 | --- | --- | --- |
-| Visión | width 480; threshold 0.56; hysteresis 0.22; release 90 ms; min area 0.35% | Más señal débil y una pérdida aislada tolerada, sin fantasmas largos |
-| Densidad | spacing 5.2; BODY budget 17 000; far/close 1.0 | No adelgazar a la persona lejana; multipersona sigue limitado por presupuesto |
+| Visión | width 480; threshold 0.56; hysteresis 0.22; release 90 ms; min area 0.15%; poseFPS 10 | Más señal débil y una pérdida aislada tolerada, sin fantasmas largos; Pose sólo alimenta gestos y no le disputa la GPU a la silueta |
+| Densidad | spacing 5.2; BODY budget 19 000; far/close 1.0 | No adelgazar a la persona lejana; multipersona sigue limitado por presupuesto |
 | Punto | idle 1.9; far 2.75; close 3.05 | Más presencia en LED sin volver la silueta sólida |
 | Contorno | threshold 0.47; hysteresis 0.08; size ×1.12; brightness ×1.48 | Cabeza, hombros y extremidades legibles sin dibujar un outline |
 | Continuidad | occlusion grace 150 ms | BODY→BODY y `personId` se conservan durante omisiones breves |
@@ -149,6 +149,36 @@ Hacer una fila por distancia y preset, anotando los valores del panel:
 
 El criterio principal es 2.5–3 m caminando y levantando brazos. A 3–4 m deben permanecer cabeza, torso, brazos y postura general; no se exige detalle fino de dedos.
 
+### Fluidez y alcance: dónde se va el tiempo
+
+Tres cosas distintas se confunden en "va lagueado". El panel las separa:
+
+| Línea del panel | Qué mide | Qué significa si está mal |
+| --- | --- | --- |
+| `cámara N fps medidos` | Frames que la webcam entrega de verdad | Menos de 25–30 es un problema de cámara, no de código: normalmente poca luz (el autoexposure alarga la exposición) o un modo de captura lento |
+| `captura N /s · X ms` | Coste del hilo principal por pedir el frame a la cámara | Si sube, el `render fps` baja aunque los modelos estén libres |
+| `segmentación N fps · X ms` | Ritmo e inferencia de la silueta | Es el ritmo real del espejo |
+| `pipeline X ms` | Cámara → frame BODY dibujado | La latencia que se percibe como retraso |
+| `render N fps · js X ms` | Dibujo y simulación | `js` alto con `captura` baja = demasiadas partículas |
+
+Decisiones tomadas a partir de esas medidas:
+
+- **Una sola captura por tick.** Cuerpo y Pose comparten el mismo `ImageBitmap`; sólo se copia el bitmap ya reducido cuando toca frame de Pose. Decodificar el video dos veces por tick era el trabajo más caro del hilo principal.
+- **Pose a 10 fps en LARGE.** Alimenta gestos y nada más; a 15 fps le disputaba la GPU a la silueta.
+- **Dedos apagados por defecto.** Ver más abajo.
+
+**Alcance.** El segmentador trabaja internamente a 256×144, y eso —no la cámara— es el techo del detalle. A 5 m con una webcam de ángulo ancho una persona ocupa ~15 px de esos 256: sale un bulto. Por eso:
+
+- Subir `vision.inferenceWidth` no añade detalle, sólo suaviza el reescalado.
+- Subir la resolución de la cámara tampoco: el modelo reduce igual.
+- Lo que sí añade detalle es **recortar**. Con `vision.cropAtCapture` (activo por defecto) `camera.crop` deja de ser un filtro y pasa a ser un zoom: el recorte se toma del video al capturar, así que esos 256×144 se gastan sólo en la zona útil. La región capturada se expande hasta recuperar la proporción del encuadre —el segmentador redimensiona sin respetar el aspecto y una región estirada le deforma a las personas—, de modo que **sólo hay ganancia si el recorte reduce ancho y alto a la vez**. Lo que se ve sigue siendo exactamente `camera.crop`.
+
+```text
+/?camera.crop={"x":0.2,"y":0.1,"width":0.6,"height":0.6}   # ~1.6× de resolución de silueta
+```
+
+En hardware: lo que amplía el alcance no son megapíxeles sino **ángulo de visión más cerrado** (la persona ocupa más de esos 256×144) y **luz** (a 30 fps reales, no 15). `?mock=true` desactiva `cropAtCapture`: no hay cámara que recortar.
+
 ### Detalle de silueta
 
 La forma de cada persona sigue el contorno real de la máscara, no una cuadrícula de píxeles:
@@ -156,7 +186,7 @@ La forma de cada persona sigue el contorno real de la máscara, no una cuadrícu
 - **Contorno subpíxel.** El worker envía, junto con el mapa de siluetas, la confianza ya suavizada (0..255). `TargetField` la interpola en la posición exacta de cada celda. Así la retícula (`particleSpacing` 5.5 px de referencia) puede ser más fina que un píxel de máscara (~6 px a 1080p) sin escalones.
 - **Borde sobre el contorno.** Cada celda de borde se desplaza sobre el gradiente de confianza hasta `silhouette.contourThreshold` (0.5), con tope `maxSnap`. El borde no usa jitter y flota apenas (`livingBody.edgeFloat`). Tiene brillo extra con `edgeBrightness`.
 - **Sin parpadeo.** Cada celda tiene histéresis propia (`contourHysteresis`).
-- **Densidad.** STANDARD usa `particleCount` 24 000 y `bodyParticleBudget` 15 000; LARGE sube el presupuesto a 17 000. Ambos conservan densidad far/close 1.0. Si varias personas superan el presupuesto, sólo se aclara el interior: el contorno se conserva (`silhouette.protectEdges`).
+- **Densidad.** STANDARD usa `particleCount` 24 000 y `bodyParticleBudget` 15 000; LARGE sube el presupuesto a 19 000. Ambos conservan densidad far/close 1.0. Si varias personas superan el presupuesto, sólo se aclara el interior: el contorno se conserva (`silhouette.protectEdges`).
 
 | Escena simulada (1080p, pipeline máscara → partículas) | Antes | Ahora |
 | --- | --- | --- |
@@ -176,7 +206,9 @@ La máscara general de toda la escena no tiene resolución suficiente para un de
 4. **Dónde manda.** La mano reemplaza a la máscara general sólo alrededor de los dedos (`patchReach`, `patchFeather`); más allá —antebrazo, cuerpo— manda la máscara general, así que la mano nunca se separa del brazo. El contorno de los dedos también se ajusta con precisión subpíxel.
 5. **Nunca se congela.** Cada observación caduca sola entre `fadeStartMs` y `maxAgeMs`: si el análisis se atrasa o pierde la mano, los dedos se funden con la silueta en lugar de quedarse pegados donde estaban.
 
-**Aislado del cuerpo.** Todo esto vive en su propio worker (`hands.worker.ts`). Si se atrasa, falla o el equipo no da, la segmentación del cuerpo no pierde ni un frame; tras tres fallos seguidos los dedos se apagan por el resto de la sesión. `?hands.enabled=false` los desactiva.
+**Apagados por defecto.** En la instalación real (personas a 3–8 m) el análisis costaba ~200 ms de GPU por tanda y no llegaba a pintar ni una celda de dedo, mientras le robaba frames a la silueta del cuerpo. `hands.enabled` es `false`; con público cerca se encienden con `?hands.enabled=true`.
+
+**Aislado del cuerpo.** Todo esto vive en su propio worker (`hands.worker.ts`). Si se atrasa, falla o el equipo no da, la segmentación del cuerpo no pierde ni un frame; tras tres fallos seguidos los dedos se apagan por el resto de la sesión.
 
 **Alcance real.** Los dedos dependen de cuántos píxeles de cámara ocupa la mano: con 1280×720 son nítidos hasta ~1.5 m, se degradan hacia ~2.5 m y más lejos el Hand Landmarker deja de encontrar la mano (entonces la silueta vuelve al bulto de siempre). Subir `camera.cameraWidth` a 1920 amplía ese rango a costa de captura.
 
@@ -400,18 +432,19 @@ Pérdidas breves de detección (menos de 900 ms) no cuentan como salida. Si la p
 
 ## Limitaciones conocidas
 
-- **Personas lejanas.** El segmentador de MediaPipe está entrenado para distancias de selfie y videollamada: más allá de ~3–4 m pierde definición.
+- **Personas lejanas.** El segmentador de MediaPipe está entrenado para distancias de selfie y videollamada: más allá de ~3–4 m pierde definición. El techo es su tensor interno de 256×144, no la cámara: la única forma real de ganar detalle a distancia es que la persona ocupe más de esos 256×144 (recorte de captura, óptica más cerrada o acercar la cámara).
 - **Personas juntas.** Dos personas que se tocan se funden en una silueta. Es segmentación semántica, no por instancias.
 - **Multipose.** Se solicitan hasta cuatro poses, pero el modelo lite puede perder personas lejanas, ocluidas o muy juntas; la máscara sigue siendo semántica y no se asigna como instancia perfecta.
 - **Dedos a distancia.** El Hand Landmarker necesita que la mano ocupe suficientes píxeles: más allá de ~2.5 m con 1280×720 deja de encontrarla y la mano vuelve a verse como un bulto. Los dedos dependen además de Pose: si no ve la muñeca, no hay recorte que analizar.
 - **Reflejos del vidrio.** Pueden generar siluetas falsas, sobre todo de noche. Se mitiga con `crop`, área mínima y la instalación física de la cámara (ver análisis).
 - **Perfil LARGE es un punto de partida.** La óptica, pitch físico, resolución del controlador LED y distancia de lectura todavía requieren calibración en sitio.
+- **Cámara por debajo de sus FPS.** Con poca luz la webcam alarga la exposición y entrega 14–19 fps en vez de 30; el espejo no puede ir más fluido que eso. Se ve en `cámara N fps medidos` y se corrige con luz o fijando la exposición (`v4l2-ctl` en Linux), no con código.
 - **Mediciones pendientes con cámara real.** Los tiempos de inferencia se midieron con frames sintéticos: falta confirmar la latencia completa cámara → partículas.
 - **Navegador.** Sólo se prueba en Chrome/Chromium.
 
 ## Verificación
 
-`npm test` (75 pruebas), `npm run typecheck` y `npm run build` validan lógica pura, contratos TypeScript y bundle de producción. Las pruebas cubren, entre otras cosas, STANDARD/LARGE y sus rangos, retención corta de extremidades sin fantasmas, traslación de la silueta al caminar sin overshoot, predicción ante brazos/frenado/giro, departure escalonado, reveal sin pérdida de tracking, elección de espacio negativo, lock de formación por persona, estela visual sin alterar el núcleo espejo, contorno subpíxel, protección del contorno ante el presupuesto, manos y recortes. La medición motion-to-photon sigue siendo una prueba física externa con video de alta velocidad.
+`npm test` (81 pruebas), `npm run typecheck` y `npm run build` validan lógica pura, contratos TypeScript y bundle de producción. Las pruebas cubren, entre otras cosas, STANDARD/LARGE y sus rangos, retención corta de extremidades sin fantasmas, traslación de la silueta al caminar sin overshoot, predicción ante brazos/frenado/giro, departure escalonado, reveal sin pérdida de tracking, elección de espacio negativo, lock de formación por persona, estela visual sin alterar el núcleo espejo, contorno subpíxel, protección del contorno ante el presupuesto, manos, recortes y la región de captura (zoom sin deformar y sin mover lo que se ve). La medición motion-to-photon sigue siendo una prueba física externa con video de alta velocidad.
 
 ## Créditos y licencias
 

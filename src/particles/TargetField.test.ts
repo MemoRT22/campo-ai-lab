@@ -299,6 +299,7 @@ describe('TargetField dedos', () => {
 
   function fieldWithHands(handTimestamp: number | null, now = 1000) {
     const config = structuredClone(defaultConfig);
+    config.hands.enabled = true;
     config.camera.mirror = false;
     config.camera.fit = 'contain';
     config.particles.particleDensity = { far: 1, close: 1 };

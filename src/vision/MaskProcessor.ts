@@ -1,4 +1,4 @@
-import type { Config, NormalizedRect } from '../config';
+import { frameRegion, type Config, type NormalizedRect } from '../config';
 import { clamp, expAlpha, smoothstep } from '../utils/MathUtils';
 import type { PersonInfo } from './types';
 
@@ -38,7 +38,7 @@ export function maskSettingsFrom(config: Config): MaskProcessorSettings {
     presenceConfirmMs: v.presenceConfirmMs,
     trackMatchDistance: v.trackMatchDistance,
     trackTimeoutMs: v.trackTimeoutMs,
-    crop: { ...config.camera.crop },
+    crop: { ...frameRegion(config) },
     proximity: { ...config.proximity },
   };
 }

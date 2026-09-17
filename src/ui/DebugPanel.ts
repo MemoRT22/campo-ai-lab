@@ -1,4 +1,4 @@
-import type { Config } from '../config';
+import { captureRegion, type Config } from '../config';
 import type { Experience } from '../core/Experience';
 import type { InteractionManager } from '../interaction/InteractionManager';
 import type { GestureRecognizer } from '../interaction/GestureRecognizer';
@@ -210,6 +210,7 @@ export class DebugPanel {
     const status = source.status;
     const camera = status.cameraInfo;
     const gesture = interaction.lastGesture;
+    const region = captureRegion(this.ctx.config);
     let predictionCount = 0;
     const motion: string[] = [];
     for (let i = 0; i < field.peopleCount; i++) {
@@ -229,6 +230,7 @@ export class DebugPanel {
       `cámara      ${status.cameraFps.toFixed(1)} fps medidos · ${status.camera}`,
       `captura req ${camera.requestedWidth}×${camera.requestedHeight} @ ${camera.requestedFps} · entregada ${camera.deliveredWidth || '—'}×${camera.deliveredHeight || '—'} @ ${camera.deliveredFps ? camera.deliveredFps.toFixed(0) : '—'}`,
       `dispositivo ${camera.deviceIndex >= 0 ? `#${camera.deviceIndex}` : '—'} · ${camera.label || status.cameraDetail || '—'} · aspect ${camera.aspectRatio ? camera.aspectRatio.toFixed(3) : '—'}`,
+      `captura     ${status.captureFps.toFixed(1)} /s · ${status.captureMs.toFixed(1)} ms (hilo principal) · región ${(region.width * 100).toFixed(0)}×${(region.height * 100).toFixed(0)}% ${this.ctx.config.vision.cropAtCapture ? 'al capturar' : 'después de inferir'}`,
       `inferencia  input ${this.inferenceInput} · máscara ${this.maskResolution} · preset ${this.ctx.config.vision.inferenceWidth}`,
       `segmentación ${perf.segmentationFps.toFixed(1)} fps · ${perf.inferenceMs.toFixed(1)} ms inf · ${perf.maskProcessingMs.toFixed(1)} ms mask · age ${bodyAge} ms`,
       `pose        ${status.pose.state} · ${perf.poseFps.toFixed(1)} fps · ${perf.poseInferenceMs.toFixed(1)} ms inf · age ${poseAge} ms${status.pose.lastError ? ` · ${summarize(status.pose.lastError)}` : ''}`,

@@ -8,6 +8,9 @@ const MAX_FAILURES = 3;
 /**
  * Gestiona el pipeline de Pose en un worker dedicado.
  * Permite que Pose corra a sus propios FPS sin bloquear la segmentación del cuerpo.
+ *
+ * No captura video: recibe el mismo bitmap que ya se capturó para el cuerpo. Decodificar el frame
+ * de la cámara dos veces por tick era el trabajo más caro del hilo principal.
  */
 export class PoseTracker {
   readonly status: PoseTrackerStatus;
@@ -26,7 +29,7 @@ export class PoseTracker {
   private lastResultAt = 0;
   private pendingTimestamp = 0;
 
-  constructor(private readonly config: Config, private readonly video: HTMLVideoElement, status: PoseTrackerStatus) {
+  constructor(private readonly config: Config, status: PoseTrackerStatus) {
     this.status = status;
   }
 
@@ -54,38 +57,29 @@ export class PoseTracker {
       return;
     }
     if (!this.ready) return;
-    if (this.inFlight) {
-      if (now - this.sentAt > settings.workerTimeoutMs) this.restart('El worker de pose dejó de responder');
+    if (this.inFlight && now - this.sentAt > settings.workerTimeoutMs) this.restart('El worker de pose dejó de responder');
+  }
+
+  /** true si toca un frame de pose. El origen captura una sola vez y comparte ese bitmap. */
+  wantsFrame(now: number): boolean {
+    if (!this.running || !this.worker || !this.ready || this.inFlight) return false;
+    return now - this.lastRequestAt >= 1000 / this.config.vision.poseFPS - 4;
+  }
+
+  /** Toma la propiedad del bitmap: lo transfiere al worker o lo cierra. */
+  submit(bitmap: ImageBitmap, now: number): void {
+    const worker = this.worker;
+    if (!worker || !this.ready || this.inFlight) {
+      bitmap.close();
       return;
     }
-    if (now - this.lastRequestAt < 1000 / settings.poseFPS - 4) return;
-
-    const { videoWidth, videoHeight } = this.video;
-    if (videoWidth === 0 || videoHeight === 0) return;
-
     this.lastRequestAt = now;
     this.inFlight = true;
     this.sentAt = now;
     this.pendingTimestamp = now;
     const id = ++this.requestId;
-    const worker = this.worker;
-
-    const width = settings.inferenceWidth;
-    const height = Math.max(1, Math.round((width * videoHeight) / videoWidth));
-
-    createImageBitmap(this.video, { resizeWidth: width, resizeHeight: height, resizeQuality: 'low' })
-      .then((bitmap) => {
-        if (!this.worker || this.worker !== worker || id !== this.requestId) {
-          bitmap.close();
-          return;
-        }
-        const message: PoseFrameMessage = { type: 'frame', id, bitmap };
-        worker.postMessage(message, [bitmap]);
-      })
-      .catch((error: unknown) => {
-        if (this.worker === worker) this.inFlight = false;
-        console.warn('[pose] No se pudo capturar el frame', error);
-      });
+    const message: PoseFrameMessage = { type: 'frame', id, bitmap };
+    worker.postMessage(message, [bitmap]);
   }
 
   private spawnWorker(): void {

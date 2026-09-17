@@ -294,6 +294,8 @@ export function validateConfig(input: Config): Config {
   }
 
   config.camera.crop = normalizeRect(config.camera.crop, defaultConfig.camera.crop);
+  // Sin cámara no hay nada que recortar al capturar: la silueta sintética ya llega completa.
+  if (config.mockVision) config.vision.cropAtCapture = false;
   const delays = config.camera.retryDelaysMs;
   config.camera.retryDelaysMs = Array.isArray(delays)
     ? delays.filter((value) => Number.isFinite(value) && value >= 100 && value <= 300000).map((value) => Math.round(value))

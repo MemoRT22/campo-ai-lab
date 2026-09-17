@@ -32,6 +32,7 @@ describe('MaskProcessor', () => {
     config.vision.spatialBlurRadius = 0;
     config.vision.smoothingAttackMs = 0;
     config.vision.presenceConfirmMs = 0;
+    config.vision.cropAtCapture = false;
     config.camera.crop = { x: 0.5, y: 0, width: 0.5, height: 1 };
     const processor = new MaskProcessor(maskSettingsFrom(config));
     const confidence = new Float32Array(100).fill(1);
@@ -47,6 +48,7 @@ describe('MaskProcessor confidence output', () => {
     config.vision.spatialBlurRadius = 0;
     config.vision.smoothingAttackMs = 0;
     config.vision.presenceConfirmMs = 0;
+    config.vision.cropAtCapture = false;
     config.camera.crop = { x: 0.5, y: 0, width: 0.5, height: 1 };
     const processor = new MaskProcessor(maskSettingsFrom(config));
     const confidence = new Float32Array(100).fill(0.75);
@@ -86,5 +88,22 @@ describe('MaskProcessor temporal continuity', () => {
     // Tras varias constantes de tiempo desaparece: no queda un brazo fantasma por segundos.
     for (let t = 66; t <= 396; t += 33) processor.process(confidence, 20, 10, t, map);
     expect(map[4 * 20 + 3]).toBe(0);
+  });
+});
+
+describe('MaskProcessor recorte en la captura', () => {
+  it('no vuelve a recortar una máscara que ya llega recortada', () => {
+    const config = structuredClone(defaultConfig);
+    config.vision.spatialBlurRadius = 0;
+    config.vision.smoothingAttackMs = 0;
+    config.vision.presenceConfirmMs = 0;
+    // Con cropAtCapture el recorte se aplicó al pedir el frame: la máscara YA es sólo esa región.
+    config.vision.cropAtCapture = true;
+    config.camera.crop = { x: 0.25, y: 0.1, width: 0.5, height: 0.5 };
+    const processor = new MaskProcessor(maskSettingsFrom(config));
+    const confidence = new Float32Array(100).fill(1);
+    const map = new Uint8Array(100);
+    processor.process(confidence, 10, 10, 0, map);
+    expect(map.filter(Boolean).length).toBe(100);
   });
 });

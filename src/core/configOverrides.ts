@@ -27,6 +27,8 @@ export const CALIBRATION_PATHS = new Set([
   'vision.spatialBlurRadius',
   'vision.inferenceWidth',
   'vision.processingFPS',
+  'vision.poseFPS',
+  'vision.cropAtCapture',
   'vision.poseDetectionConfidence',
   'camera.cameraWidth',
   'camera.cameraHeight',
@@ -71,9 +73,12 @@ export function applyDisplayProfile(config: Config, profile: DisplayProfile): vo
   config.vision.maskThreshold = 0.56;
   config.vision.maskHysteresis = 0.22;
   config.vision.smoothingReleaseMs = 90;
-  config.vision.minPersonArea = 0.0035;
+  // Una persona a 7–8 m ocupa muy pocos píxeles del modelo: el filtro de área no puede descartarla.
+  config.vision.minPersonArea = 0.0015;
+  // Pose sólo alimenta los gestos; bajarla deja la GPU para la silueta, que es lo que se ve.
+  config.vision.poseFPS = 10;
 
-  config.particles.bodyParticleBudget = 17000;
+  config.particles.bodyParticleBudget = 19000;
   config.particles.particleSpacing = 5.2;
   config.particles.particleDensity = { far: 1, close: 1 };
   config.particles.particleSize = { idle: 1.9, far: 2.75, close: 3.05 };

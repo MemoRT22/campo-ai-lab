@@ -1,4 +1,4 @@
-import type { Config } from '../config';
+import { frameRegion, type Config } from '../config';
 import { clamp01, createRandom, expAlpha, lerp, screenScale, smoothstep } from '../utils/MathUtils';
 import { HandShape, MAX_HANDS, handAnchor, sampleUint8, type HandObservation } from '../vision/handGeometry';
 import type { PersonInfo, VisionFrame } from '../vision/types';
@@ -272,7 +272,7 @@ export class TargetField {
     slotSumY.fill(0);
 
     this.lastPeople.length = 0;
-    const { crop } = cfg.camera;
+    const crop = frameRegion(cfg);
     this.pendingCount = 0;
     for (const person of frame.people) {
       this.lastPeople.push({ ...person });
@@ -426,7 +426,8 @@ export class TargetField {
 
   /** Convierte coordenadas normalizadas de cámara a px CSS en pantalla (aplica recorte, encuadre y espejo). */
   cameraToScreen(u: number, v: number, out: { x: number; y: number }): { x: number; y: number } {
-    const { crop, mirror } = this.config.camera;
+    const crop = frameRegion(this.config);
+    const { mirror } = this.config.camera;
     let su = (u - crop.x) / crop.width;
     if (mirror) su = 1 - su;
     out.x = this.mapOffsetX + su * this.mapScaleX;
@@ -898,7 +899,8 @@ export class TargetField {
   }
 
   private ensureMapping(maskWidth: number, maskHeight: number): void {
-    const { crop, fit, mirror } = this.config.camera;
+    const crop = frameRegion(this.config);
+    const { fit, mirror } = this.config.camera;
     const key = `${this.version}:${maskWidth}x${maskHeight}`;
     if (key === this.mappingKey) return;
     this.mappingKey = key;

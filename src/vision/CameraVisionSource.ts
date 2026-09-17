@@ -1,4 +1,4 @@
-import type { Config } from '../config';
+import { captureRegion, type Config } from '../config';
 import { CameraManager } from './CameraManager';
 import { HandTracker } from './HandTracker';
 import { PoseTracker } from './PoseTracker';
@@ -7,10 +7,15 @@ import type { FrameMessage, FromWorker, InitMessage } from './protocol';
 import { createVisionStatus, type VisionFrame, type VisionSource } from './types';
 import { WorkerRecoveryPolicy } from './WorkerRecoveryPolicy';
 
+const CAPTURE_SMOOTHING = 0.15;
+
 /**
  * Cámara → ImageBitmap reducido → worker (segmentación + limpieza) → VisionFrame.
  * Nunca hay más de un frame en vuelo: si la inferencia se atrasa, se descartan capturas
  * en lugar de acumular latencia.
+ *
+ * Se captura UNA sola vez por tick y el mismo bitmap alimenta cuerpo y pose: decodificar el frame
+ * de la cámara es el trabajo más caro del hilo principal, y hacerlo dos veces bajaba los FPS.
  */
 export class CameraVisionSource implements VisionSource {
   readonly status = createVisionStatus();
@@ -27,6 +32,7 @@ export class CameraVisionSource implements VisionSource {
   private inFlight = false;
   private sentAt = 0;
   private lastCaptureAt = 0;
+  private lastCaptureDoneAt = 0;
   private recycled: ArrayBuffer | null = null;
   private recycledConfidence: ArrayBuffer | null = null;
   private hasPending = false;
@@ -50,7 +56,7 @@ export class CameraVisionSource implements VisionSource {
   constructor(private readonly config: Config) {
     this.recovery = new WorkerRecoveryPolicy(config.vision.delegate, config.vision.runtimeFailureThreshold, config.camera.retryDelaysMs);
     this.camera = new CameraManager(config.camera);
-    this.pose = new PoseTracker(config, this.camera.video, this.status.pose);
+    this.pose = new PoseTracker(config, this.status.pose);
     this.hands = new HandTracker(config, this.camera.video, this.status.hands);
     this.camera.onStatusChange = () => {
       this.status.camera = this.camera.status;
@@ -93,20 +99,20 @@ export class CameraVisionSource implements VisionSource {
 
     if (!this.worker) {
       if (now >= this.workerRetryAt) this.spawnWorker();
-      return;
-    }
-    if (!this.workerReady && now - this.workerSpawnedAt > this.config.vision.workerInitTimeoutMs) {
+    } else if (!this.workerReady && now - this.workerSpawnedAt > this.config.vision.workerInitTimeoutMs) {
       this.restartWorker('El pipeline de visión no terminó de iniciar a tiempo', true);
-      return;
+    } else if (this.inFlight && now - this.sentAt > this.config.vision.workerTimeoutMs) {
+      this.restartWorker('El worker de visión dejó de responder');
     }
-    if (this.inFlight) {
-      if (now - this.sentAt > this.config.vision.workerTimeoutMs) this.restartWorker('El worker de visión dejó de responder');
-      return;
-    }
+
+    // Pose no depende del worker del cuerpo: si éste se cae, los gestos siguen vivos.
+    const forBody = this.worker !== null && this.workerReady && !this.inFlight;
+    const forPose = this.pose.wantsFrame(now);
+    if (!forBody && !forPose) return;
     // Tolerancia de 4 ms para no perder capturas por desalineación con requestAnimationFrame.
     if (now - this.lastCaptureAt < 1000 / this.config.vision.processingFPS - 4) return;
-    if (!this.camera.pollFrame(now) || !this.workerReady) return;
-    this.capture(now);
+    if (!this.camera.pollFrame(now)) return;
+    this.capture(now, forBody, forPose);
   }
 
   takeFrame(): VisionFrame | null {
@@ -119,22 +125,49 @@ export class CameraVisionSource implements VisionSource {
     return this.frame;
   }
 
-  private capture(now: number): void {
+  private capture(now: number, forBody: boolean, forPose: boolean): void {
     const video = this.camera.video;
+    // Recortar aquí y no después: el modelo gasta sus 256×144 sólo en la zona útil.
+    const region = captureRegion(this.config);
+    const sx = Math.round(region.x * video.videoWidth);
+    const sy = Math.round(region.y * video.videoHeight);
+    const sw = Math.max(1, Math.round(region.width * video.videoWidth));
+    const sh = Math.max(1, Math.round(region.height * video.videoHeight));
     const width = this.config.vision.inferenceWidth;
-    const height = Math.max(1, Math.round((width * video.videoHeight) / video.videoWidth));
+    const height = Math.max(1, Math.round((width * sh) / sw));
     const worker = this.worker;
-    this.inFlight = true;
-    this.status.worker = 'busy';
-    this.sentAt = now;
+    if (forBody) {
+      this.inFlight = true;
+      this.status.worker = 'busy';
+      this.sentAt = now;
+    }
     this.lastCaptureAt = now;
+    const requestedAt = performance.now();
 
-    createImageBitmap(video, { resizeWidth: width, resizeHeight: height, resizeQuality: 'low' })
-      .then((bitmap) => {
-        if (!worker || worker !== this.worker || !this.workerReady) {
-          bitmap.close();
-          if (worker === this.worker) this.inFlight = false;
+    createImageBitmap(video, sx, sy, sw, sh, { resizeWidth: width, resizeHeight: height, resizeQuality: 'low' })
+      .then(async (bitmap) => {
+        this.recordCapture(requestedAt);
+        const usable = worker !== null && worker === this.worker && this.workerReady;
+        if (forPose && (!forBody || !usable)) {
+          // Nadie más quiere el frame: pose se queda con el original.
+          this.pose.submit(bitmap, now);
+          if (forBody && worker === this.worker) this.inFlight = false;
           return;
+        }
+        if (!usable) {
+          bitmap.close();
+          if (forBody && worker === this.worker) this.inFlight = false;
+          return;
+        }
+        if (forPose) {
+          // Copiar un bitmap ya reducido cuesta mucho menos que volver a decodificar el video.
+          const copy = await createImageBitmap(bitmap).catch(() => null);
+          if (copy) this.pose.submit(copy, now);
+          if (worker !== this.worker || !this.workerReady) {
+            bitmap.close();
+            this.inFlight = false;
+            return;
+          }
         }
         const recycled = this.recycled;
         const recycledConfidence = this.recycledConfidence;
@@ -147,9 +180,21 @@ export class CameraVisionSource implements VisionSource {
         worker.postMessage(message, transfer);
       })
       .catch((error: unknown) => {
-        if (worker === this.worker) this.inFlight = false;
+        if (forBody && worker === this.worker) this.inFlight = false;
         console.warn('[vision] No se pudo capturar el frame', error);
       });
+  }
+
+  /** Coste y ritmo reales de la captura: separa "la GPU va lenta" de "la cámara entrega poco". */
+  private recordCapture(requestedAt: number): void {
+    const done = performance.now();
+    const ms = done - requestedAt;
+    this.status.captureMs += (ms - this.status.captureMs) * CAPTURE_SMOOTHING;
+    if (this.lastCaptureDoneAt > 0) {
+      const fps = 1000 / Math.max(1, done - this.lastCaptureDoneAt);
+      this.status.captureFps += (fps - this.status.captureFps) * CAPTURE_SMOOTHING;
+    }
+    this.lastCaptureDoneAt = done;
   }
 
   private spawnWorker(): void {

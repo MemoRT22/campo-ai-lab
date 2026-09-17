@@ -52,6 +52,12 @@ export const defaultConfig = {
     poseFPS: 15,
     /** Ancho del frame enviado al modelo. El segmentador trabaja internamente a 256×144. */
     inferenceWidth: 320,
+    /**
+     * Recortar en la captura en lugar de descartar píxeles después de inferir.
+     * El modelo trabaja siempre a 256×144: si `camera.crop` se aplica al capturar, esos 256×144
+     * se gastan sólo en la zona útil y una persona lejana gana resolución real de silueta.
+     */
+    cropAtCapture: true,
     delegate: 'GPU' as Delegate,
     modelPath: 'models/selfie_segmenter_landscape.tflite',
     poseModelPath: 'models/pose_landmarker_lite.task',
@@ -91,7 +97,12 @@ export const defaultConfig = {
    * Corre en su propio worker: si se atrasa, la silueta del cuerpo no pierde ni un frame.
    */
   hands: {
-    enabled: true,
+    /**
+     * Apagado por defecto: en la instalación real (personas a 3–8 m) el análisis costaba ~200 ms de
+     * GPU por tanda y no llegaba a pintar ni una celda de dedo, mientras robaba frames al cuerpo.
+     * Encender sólo con público cerca: `?hands.enabled=true`.
+     */
+    enabled: false,
     modelPath: 'models/hand_landmarker.task',
     /** Frecuencia máxima del análisis; sólo corre cuando Pose ve una muñeca. */
     fps: 20,
@@ -564,3 +575,49 @@ export const defaultConfig = {
 };
 
 export type Config = typeof defaultConfig;
+
+/** Encuadre completo: el recorte neutro. */
+export const FULL_FRAME: NormalizedRect = { x: 0, y: 0, width: 1, height: 1 };
+
+function clampRange(value: number, min: number, max: number): number {
+  return value < min ? min : value > max ? max : value;
+}
+
+/**
+ * Región del video que se captura y se envía a los modelos.
+ *
+ * Con `cropAtCapture`, recortar deja de ser un filtro y pasa a ser un zoom óptico: los 256×144 del
+ * segmentador se gastan sólo en la zona útil, y una persona lejana gana resolución real de silueta.
+ * La región se expande hasta recuperar la proporción del encuadre porque el segmentador redimensiona
+ * sin respetar el aspecto: una región estirada le deforma a las personas. Por eso sólo hay ganancia
+ * si el recorte reduce ancho y alto a la vez.
+ */
+export function captureRegion(config: Config): NormalizedRect {
+  if (!config.vision.cropAtCapture) return FULL_FRAME;
+  const crop = config.camera.crop;
+  const size = clampRange(Math.max(crop.width, crop.height), 0, 1);
+  if (size >= 1) return FULL_FRAME;
+  return {
+    x: clampRange(crop.x + crop.width / 2 - size / 2, 0, 1 - size),
+    y: clampRange(crop.y + crop.height / 2 - size / 2, 0, 1 - size),
+    width: size,
+    height: size,
+  };
+}
+
+/**
+ * Recorte que queda por aplicar sobre una máscara ya inferida: el recorte pedido, expresado dentro
+ * de la región capturada. La zona visible es siempre `camera.crop`, se haya capturado como se haya
+ * capturado.
+ */
+export function frameRegion(config: Config): NormalizedRect {
+  const crop = config.camera.crop;
+  const region = captureRegion(config);
+  if (region.width >= 1 && region.height >= 1) return crop;
+  return {
+    x: (crop.x - region.x) / region.width,
+    y: (crop.y - region.y) / region.height,
+    width: crop.width / region.width,
+    height: crop.height / region.height,
+  };
+}

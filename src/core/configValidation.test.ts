@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { defaultConfig } from '../config';
+import { FULL_FRAME, captureRegion, defaultConfig, frameRegion } from '../config';
 import { resolveConfig } from './configOverrides';
 import { validateConfig } from './configValidation';
 
@@ -85,5 +85,52 @@ describe('config validation', () => {
     expect(config.particles.particleOpacity.far).toBe(1);
     expect(config.particles.silhouette.edgeSize).toBe(2);
     expect(config.particles.edgeBrightness).toBe(0.5);
+  });
+});
+
+describe('región de captura', () => {
+  it('sin recorte no cambia nada', () => {
+    const config = resolveConfig('', null);
+    expect(captureRegion(config)).toEqual(FULL_FRAME);
+    expect(frameRegion(config)).toEqual(config.camera.crop);
+  });
+
+  it('una banda ancha no puede acercarse: estirarla deformaría a las personas', () => {
+    const config = resolveConfig('?camera.crop={"x":0,"y":0.2,"width":1,"height":0.6}', null);
+    expect(captureRegion(config)).toEqual(FULL_FRAME);
+    // El recorte se sigue aplicando después de inferir, como siempre.
+    expect(frameRegion(config)).toEqual(config.camera.crop);
+  });
+
+  it('un recorte en ancho y alto acerca el modelo y deja la zona visible igual', () => {
+    const config = resolveConfig('?camera.crop={"x":0.25,"y":0.1,"width":0.5,"height":0.4}', null);
+    const region = captureRegion(config);
+    // Mismo aspecto que el encuadre (ancho y alto normalizados iguales): 2× de resolución lineal.
+    expect(region.width).toBeCloseTo(0.5, 6);
+    expect(region.height).toBeCloseTo(0.5, 6);
+    const rest = frameRegion(config);
+    // Lo que se ve sigue siendo exactamente el recorte pedido, ahora relativo a lo capturado.
+    expect(region.x + rest.x * region.width).toBeCloseTo(0.25, 6);
+    expect(region.y + rest.y * region.height).toBeCloseTo(0.1, 6);
+    expect(rest.width * region.width).toBeCloseTo(0.5, 6);
+    expect(rest.height * region.height).toBeCloseTo(0.4, 6);
+  });
+
+  it('respeta los bordes del encuadre', () => {
+    const config = resolveConfig('?camera.crop={"x":0,"y":0,"width":0.4,"height":0.2}', null);
+    const region = captureRegion(config);
+    expect(region.x).toBeGreaterThanOrEqual(0);
+    expect(region.y).toBeGreaterThanOrEqual(0);
+    expect(region.x + region.width).toBeLessThanOrEqual(1);
+    expect(region.y + region.height).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('mock y recorte', () => {
+  it('con mock el recorte vuelve a aplicarse después de inferir', () => {
+    const config = resolveConfig('?mock=true&camera.crop={"x":0.25,"y":0.25,"width":0.5,"height":0.5}', null);
+    expect(config.vision.cropAtCapture).toBe(false);
+    expect(captureRegion(config)).toEqual(FULL_FRAME);
+    expect(frameRegion(config)).toEqual(config.camera.crop);
   });
 });

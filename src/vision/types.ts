@@ -119,6 +119,10 @@ export interface VisionStatus {
   fallbackReason: string;
   cameraFps: number;
   cameraInfo: CameraDiagnostics;
+  /** Milisegundos entre pedir el bitmap de la cámara y recibirlo. Es coste del hilo principal. */
+  captureMs: number;
+  /** Capturas por segundo realmente enviadas a los modelos. */
+  captureFps: number;
   pose: PoseTrackerStatus;
   hands: HandTrackerStatus;
 }
@@ -148,6 +152,8 @@ export function createVisionStatus(): VisionStatus {
     consecutiveFailures: 0,
     fallbackReason: '',
     cameraFps: 0,
+    captureMs: 0,
+    captureFps: 0,
     cameraInfo: {
       label: '',
       deviceIndex: -1,

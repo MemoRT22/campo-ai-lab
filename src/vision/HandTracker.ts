@@ -1,4 +1,4 @@
-import type { Config, NormalizedRect } from '../config';
+import { captureRegion, type Config, type NormalizedRect } from '../config';
 import { MAX_HANDS, cropToCamera, handAnchor, roiFromHand, roiFromPose, type HandObservation, type HandSide } from './handGeometry';
 import type { HandsFrameMessage, HandsFromWorker, HandsInitMessage } from './handsProtocol';
 import type { HandTrackerStatus, PersonInfo, PoseInfo } from './types';
@@ -77,11 +77,15 @@ export class HandTracker {
 
     const { videoWidth, videoHeight } = this.video;
     if (videoWidth === 0 || videoHeight === 0) return;
+    // Pose ve la región capturada, no el encuadre completo: los ROI viven en ese mismo espacio.
+    const region = captureRegion(this.config);
+    const regionWidth = region.width * videoWidth;
+    const regionHeight = region.height * videoHeight;
     const crops: PendingCrop[] = [];
     for (const pose of poses) {
       for (const side of SIDES) {
         if (crops.length >= Math.min(settings.maxHands, MAX_HANDS)) break;
-        const roi = this.resolveRoi(pose, side, now, videoWidth, videoHeight);
+        const roi = this.resolveRoi(pose, side, now, regionWidth, regionHeight);
         if (!roi) continue;
         const wrist = pose.landmarks[side === 'left' ? 15 : 16];
         crops.push({ roi: { ...roi }, personId: this.personAt(wrist.x, wrist.y, people, personMap, maskWidth, maskHeight) });
@@ -114,29 +118,31 @@ export class HandTracker {
       });
   }
 
+  /** El ROI está normalizado dentro de la región capturada; el recorte se toma del video completo. */
   private captureCrop(roi: NormalizedRect, videoWidth: number, videoHeight: number): Promise<ImageBitmap> {
     const { cropWidth, cropHeight } = this.config.hands;
+    const region = captureRegion(this.config);
     return createImageBitmap(
       this.video,
-      Math.round(roi.x * videoWidth),
-      Math.round(roi.y * videoHeight),
-      Math.max(1, Math.round(roi.width * videoWidth)),
-      Math.max(1, Math.round(roi.height * videoHeight)),
+      Math.round((region.x + roi.x * region.width) * videoWidth),
+      Math.round((region.y + roi.y * region.height) * videoHeight),
+      Math.max(1, Math.round(roi.width * region.width * videoWidth)),
+      Math.max(1, Math.round(roi.height * region.height * videoHeight)),
       { resizeWidth: cropWidth, resizeHeight: cropHeight, resizeQuality: 'medium' },
     );
   }
 
   /** Prefiere encuadrar con los puntos de la mano anterior; si no hay, usa Pose. */
-  private resolveRoi(pose: PoseInfo, side: HandSide, now: number, videoWidth: number, videoHeight: number): NormalizedRect | null {
+  private resolveRoi(pose: PoseInfo, side: HandSide, now: number, regionWidth: number, regionHeight: number): NormalizedRect | null {
     const settings = this.config.hands;
-    const poseRoi = roiFromPose(pose.landmarks, side, videoWidth, videoHeight, settings, this.roi);
+    const poseRoi = roiFromPose(pose.landmarks, side, regionWidth, regionHeight, settings, this.roi);
     if (!poseRoi) return null;
     const wrist = pose.landmarks[side === 'left' ? 15 : 16];
     for (const previous of this.observations) {
       if (previous.landmarks.length === 0 || now - previous.timestamp > settings.trackReuseMs) continue;
       const anchor = handAnchor(previous);
       if (Math.hypot(anchor.x - wrist.x, anchor.y - wrist.y) > TRACK_MATCH_DISTANCE) continue;
-      const tracked = roiFromHand(previous.landmarks, videoWidth, videoHeight, settings, this.roi);
+      const tracked = roiFromHand(previous.landmarks, regionWidth, regionHeight, settings, this.roi);
       if (tracked) return tracked;
       break;
     }
