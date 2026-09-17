@@ -58,16 +58,25 @@ function proximityLabel(value: number): string {
 export class DebugPanel {
   private readonly el: HTMLElement;
   private readonly stats: HTMLElement;
+  private readonly cameraCanvas: HTMLCanvasElement;
+  private readonly cameraCtx: CanvasRenderingContext2D;
   private readonly maskCanvas: HTMLCanvasElement;
   private readonly maskCtx: CanvasRenderingContext2D;
   private imageData: ImageData | null = null;
   private lastTextAt = 0;
-  private videoAttached = false;
   private latestPoses: VisionFrame['poses'] = [];
+  private inferenceInput = '—';
+  private maskResolution = '—';
+  private peopleSummary = '—';
 
   constructor(root: HTMLElement, private readonly ctx: DebugContext) {
     this.el = document.createElement('aside');
     this.el.className = 'debug';
+    this.cameraCanvas = document.createElement('canvas');
+    this.cameraCanvas.className = 'debug__camera';
+    const cameraCtx = this.cameraCanvas.getContext('2d');
+    if (!cameraCtx) throw new Error('Canvas 2D no disponible');
+    this.cameraCtx = cameraCtx;
     this.maskCanvas = document.createElement('canvas');
     this.maskCanvas.className = 'debug__mask';
     const maskCtx = this.maskCanvas.getContext('2d');
@@ -78,7 +87,12 @@ export class DebugPanel {
     const help = document.createElement('div');
     help.className = 'debug__help';
     help.textContent = '1 mano · 2 dos manos · 3 ondas de dos personas · D panel · F pantalla completa';
-    this.el.append(this.maskCanvas, this.stats, help);
+    this.el.append(
+      this.preview('CAMERA FRAME + ACTIVE CROP', this.cameraCanvas),
+      this.preview('PROCESSED MASK', this.maskCanvas),
+      this.stats,
+      help,
+    );
     root.appendChild(this.el);
   }
 
@@ -88,8 +102,13 @@ export class DebugPanel {
 
   drawFrame(frame: VisionFrame): void {
     if (this.el.hidden) return;
-    this.attachVideo();
+    this.drawCamera();
     const { width, height, personMap, people } = frame;
+    this.inferenceInput = `${frame.inputWidth ?? this.ctx.config.vision.inferenceWidth}×${frame.inputHeight ?? '—'}`;
+    this.maskResolution = `${width}×${height}`;
+    this.peopleSummary = people.length
+      ? people.map((person) => `#${person.id} area ${(person.area * 100).toFixed(2)}% · prox ${person.proximity.toFixed(2)}`).join(' | ')
+      : '—';
     const mirror = this.ctx.config.camera.mirror;
     if (this.maskCanvas.width !== width || this.maskCanvas.height !== height || !this.imageData) {
       this.maskCanvas.width = width;
@@ -127,7 +146,11 @@ export class DebugPanel {
       g.strokeStyle = person.confirmed ? '#ff3b30' : '#8e8e93';
       g.strokeRect(left + 0.5, top + 0.5, w, h);
       g.fillStyle = '#ff3b30';
-      g.fillText(`#${person.id} ${proximityLabel(person.proximity)} ${person.proximity.toFixed(2)}`, left + 2, Math.max(9, top - 2));
+      g.fillText(
+        `#${person.id} ${proximityLabel(person.proximity)} · area ${(person.area * 100).toFixed(2)}% · p ${person.proximity.toFixed(2)}`,
+        left + 2,
+        Math.max(9, top - 2),
+      );
     }
     for (const hand of frame.hands ?? []) {
       const at = (index: number) => ({
@@ -181,9 +204,9 @@ export class DebugPanel {
   update(now: number): void {
     if (this.el.hidden || now - this.lastTextAt < TEXT_INTERVAL_MS) return;
     this.lastTextAt = now;
-    this.attachVideo();
     const { perf, particles, source, experience, interaction, gestures, field, group, errors } = this.ctx;
     const status = source.status;
+    const camera = status.cameraInfo;
     const gesture = interaction.lastGesture;
     let predictionCount = 0;
     const motion: string[] = [];
@@ -195,14 +218,20 @@ export class DebugPanel {
       );
     }
     const lines = [
+      `perfil      ${this.ctx.config.displayProfile.toUpperCase()}`,
       `render      ${perf.renderFps.toFixed(0)} fps · js ${perf.frameMs.toFixed(2)} ms`,
-      `cámara      ${status.cameraFps.toFixed(1)} fps · ${status.camera}${status.cameraDetail ? ` · ${status.cameraDetail}` : ''}`,
+      `cámara      ${status.cameraFps.toFixed(1)} fps medidos · ${status.camera}`,
+      `captura req ${camera.requestedWidth}×${camera.requestedHeight} @ ${camera.requestedFps} · entregada ${camera.deliveredWidth || '—'}×${camera.deliveredHeight || '—'} @ ${camera.deliveredFps ? camera.deliveredFps.toFixed(0) : '—'}`,
+      `dispositivo ${camera.deviceIndex >= 0 ? `#${camera.deviceIndex}` : '—'} · ${camera.label || status.cameraDetail || '—'} · aspect ${camera.aspectRatio ? camera.aspectRatio.toFixed(3) : '—'}`,
+      `inferencia  input ${this.inferenceInput} · máscara ${this.maskResolution} · preset ${this.ctx.config.vision.inferenceWidth}`,
       `segmentación ${perf.segmentationFps.toFixed(1)} fps · ${perf.inferenceMs.toFixed(1)} ms`,
       `pose        ${perf.poseFps.toFixed(1)} fps · ${perf.poseInferenceMs.toFixed(1)} ms`,
       `manos       ${status.hands.state}${status.hands.segmentation ? ' + segmentación' : ''} · ${status.hands.fps.toFixed(1)} fps · ${status.hands.inferenceMs.toFixed(1)} ms · ${field.handsApplied}/${status.hands.hands} en silueta · ${field.handCells} celdas${status.hands.lastError ? ` · ${summarize(status.hands.lastError)}` : ''}`,
       `máscara     ${perf.maskProcessingMs.toFixed(1)} ms`,
+      `ajustes     threshold ${this.ctx.config.vision.maskThreshold.toFixed(2)} · hysteresis ${this.ctx.config.vision.maskHysteresis.toFixed(2)} · min area ${(this.ctx.config.vision.minPersonArea * 100).toFixed(2)}%`,
       `pipeline    ${perf.visionLatencyMs.toFixed(0)} ms (captura → resultado; no motion-to-photon)`,
-      `partículas  ${particles.renderCount} visibles · ${particles.bodyCount} cuerpo · ${particles.ambientCount} ambiente · ${particles.dormantCount} pool`,
+      `silueta     ${field.activeCount} celdas · densidad ${(field.densityApplied * 100).toFixed(0)}% · ${particles.bodyCount} BODY`,
+      `partículas  ${particles.renderCount} render · ${particles.ambientCount} ambiente · ${particles.dormantCount} pool · budget ${this.ctx.config.particles.bodyParticleBudget}`,
       `tracking    ${this.ctx.config.particles.trackingResponseMs} ms · prediction ${this.ctx.config.particles.predictionMs} ms · activos ${predictionCount}`,
       `texto       lado ${this.ctx.layout.side} · ocupación izq ${(this.ctx.layout.occupancyLeft * 100).toFixed(0)}% · der ${(this.ctx.layout.occupancyRight * 100).toFixed(0)}% · arriba ${(this.ctx.layout.occupancyTop * 100).toFixed(0)}%`,
       `fases       formación ${particles.motionPhaseCounts[0]} · tracking ${particles.motionPhaseCounts[1]} · rápido ${particles.motionPhaseCounts[2]} · departure ${particles.motionPhaseCounts[3]}`,
@@ -212,7 +241,7 @@ export class DebugPanel {
       `target lag  ${particles.averageTargetDistance.toFixed(1)} px promedio · ~${particles.estimatedTargetLagMs.toFixed(0)} ms`,
       `transporte  ${particles.shiftedLastFrame} trasladadas · ${particles.transportedLastFrame} reasignadas · ${particles.releasedLastFrame} liberadas · ${particles.spawnedLastFrame} spawn · ${particles.heldLastFrame} retenidas`,
       `tracks      ${motion.length ? motion.join(' | ') : '—'}`,
-      `personas    ${field.peopleCount}`,
+      `personas    ${field.peopleCount} · ${this.peopleSummary}`,
       `estado      ${experience.state.toUpperCase()}`,
       `modelo      ${status.model}${status.delegate ? ` · ${status.delegate}` : ''}${status.labels.length ? ` · [${status.labels.join(', ')}]` : ''}`,
       `worker      ${status.worker} · fallos ${status.consecutiveFailures}${status.fallbackReason ? ` · fallback: ${summarize(status.fallbackReason)}` : ''}`,
@@ -224,12 +253,42 @@ export class DebugPanel {
     this.stats.textContent = lines.join('\n');
   }
 
-  private attachVideo(): void {
+  private drawCamera(): void {
     const video = this.ctx.source.debugVideo;
-    if (this.videoAttached || !video) return;
-    this.videoAttached = true;
-    video.classList.add('debug__video');
-    if (this.ctx.config.camera.mirror) video.classList.add('is-mirrored');
-    this.el.prepend(video);
+    if (!video || video.videoWidth <= 0 || video.videoHeight <= 0) {
+      this.cameraCanvas.hidden = true;
+      return;
+    }
+    this.cameraCanvas.hidden = false;
+    const width = 480;
+    const height = Math.max(1, Math.round(width * video.videoHeight / video.videoWidth));
+    if (this.cameraCanvas.width !== width || this.cameraCanvas.height !== height) {
+      this.cameraCanvas.width = width;
+      this.cameraCanvas.height = height;
+    }
+    const g = this.cameraCtx;
+    g.save();
+    if (this.ctx.config.camera.mirror) {
+      g.translate(width, 0);
+      g.scale(-1, 1);
+    }
+    g.drawImage(video, 0, 0, width, height);
+    g.restore();
+    const crop = this.ctx.config.camera.crop;
+    const cropLeft = (this.ctx.config.camera.mirror ? 1 - crop.x - crop.width : crop.x) * width;
+    g.strokeStyle = '#ffd60a';
+    g.lineWidth = 2;
+    g.setLineDash([8, 5]);
+    g.strokeRect(cropLeft + 1, crop.y * height + 1, crop.width * width - 2, crop.height * height - 2);
+    g.setLineDash([]);
+  }
+
+  private preview(label: string, canvas: HTMLCanvasElement): HTMLElement {
+    const figure = document.createElement('figure');
+    figure.className = 'debug__preview';
+    const caption = document.createElement('figcaption');
+    caption.textContent = label;
+    figure.append(caption, canvas);
+    return figure;
   }
 }

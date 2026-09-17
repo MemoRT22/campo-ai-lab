@@ -229,6 +229,8 @@ export class MockVisionSource implements VisionSource {
     this.ctx = ctx;
     this.processor = new MaskProcessor(maskSettingsFrom(config));
     this.frame = {
+      inputWidth: WIDTH,
+      inputHeight: HEIGHT,
       width: WIDTH,
       height: HEIGHT,
       personMap: new Uint8Array(WIDTH * HEIGHT),
@@ -244,6 +246,17 @@ export class MockVisionSource implements VisionSource {
     };
     this.status.camera = 'live';
     this.status.cameraDetail = 'Fuente sintética (mock)';
+    this.status.cameraInfo = {
+      label: 'Fuente sintética',
+      deviceIndex: -1,
+      requestedWidth: WIDTH,
+      requestedHeight: HEIGHT,
+      requestedFps: config.vision.processingFPS,
+      deliveredWidth: WIDTH,
+      deliveredHeight: HEIGHT,
+      deliveredFps: config.vision.processingFPS,
+      aspectRatio: WIDTH / HEIGHT,
+    };
     this.status.model = 'ready';
   }
 

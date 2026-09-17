@@ -354,6 +354,9 @@ body.cursor-hidden * {
   flex-direction: column;
   gap: 8px;
   width: 340px;
+  max-height: calc(100vh - 24px);
+  box-sizing: border-box;
+  overflow: auto;
   padding: 10px;
   background: rgb(0 0 0 / 0.72);
   border: 1px solid rgb(255 255 255 / 0.12);
@@ -368,20 +371,25 @@ body.cursor-hidden * {
   display: none;
 }
 
-.debug__video {
-  position: static;
+.debug__camera,
+.debug__mask {
   width: 100%;
   height: auto;
-  opacity: 1;
-}
-
-.debug__video.is-mirrored {
-  transform: scaleX(-1);
+  display: block;
 }
 
 .debug__mask {
-  width: 100%;
   image-rendering: pixelated;
+}
+
+.debug__preview {
+  margin: 0;
+}
+
+.debug__preview figcaption {
+  margin-bottom: 3px;
+  color: #ffd60a;
+  letter-spacing: 0.1em;
 }
 
 .debug__stats {
@@ -440,6 +448,7 @@ body.cursor-hidden * {
 }
 
 .calibration input,
+.calibration select,
 .calibration button {
   box-sizing: border-box;
   border: 1px solid rgb(255 255 255 / 0.18);
@@ -451,6 +460,15 @@ body.cursor-hidden * {
 .calibration input {
   width: 84px;
   padding: 4px 5px;
+}
+
+.calibration select {
+  width: 84px;
+  padding: 4px 5px;
+}
+
+.calibration__profile a {
+  color: #ffd60a;
 }
 
 .calibration button {

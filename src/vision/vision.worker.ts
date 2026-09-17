@@ -37,6 +37,8 @@ async function init(message: InitMessage): Promise<void> {
 
 function handleFrame(message: FrameMessage): void {
   const { bitmap, timestamp, recycled, recycledConfidence } = message;
+  const inputWidth = bitmap.width;
+  const inputHeight = bitmap.height;
   let produced = false;
 
   try {
@@ -76,7 +78,7 @@ function handleFrame(message: FrameMessage): void {
         const personMapBuffer = personMap.buffer as ArrayBuffer;
         const confidenceBuffer = confidenceMap.buffer as ArrayBuffer;
         post(
-          { type: 'result', width, height, personMap: personMapBuffer, confidenceMap: confidenceBuffer, people, timestamp, inferenceMs, processingMs, poses, poseTimestamp, poseInferenceMs },
+          { type: 'result', inputWidth, inputHeight, width, height, personMap: personMapBuffer, confidenceMap: confidenceBuffer, people, timestamp, inferenceMs, processingMs, poses, poseTimestamp, poseInferenceMs },
           [personMapBuffer, confidenceBuffer],
         );
       }

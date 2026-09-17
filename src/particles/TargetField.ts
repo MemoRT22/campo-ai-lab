@@ -77,6 +77,8 @@ export class TargetField {
   /** Celdas activas en orden aleatorio estable (evita sesgos de barrido al asignar). */
   activeList = new Int32Array(0);
   activeCount = 0;
+  /** Fracción real de celdas candidatas conservadas tras densidad y presupuesto. */
+  densityApplied = 0;
 
   /** Personas confirmadas en pantalla (centroides en px CSS). */
   peopleCount = 0;
@@ -339,6 +341,8 @@ export class TargetField {
       if (now - center.lastSeen > cfg.vision.trackTimeoutMs * 2) this.trackCenters.delete(id);
     }
 
+    let candidateCells = 0;
+    for (let s = 0; s < slotCount.length; s++) candidateCells += slotCount[s];
     const { order, rank, active, activeList, cellProximity, cellEdge, cellOffsetX, cellOffsetY } = this;
     const { protectEdges, edgeSnap } = cfg.particles.silhouette;
     const snapContour = confidence !== undefined && confidence.length === map.length && edgeSnap > 0;
@@ -380,6 +384,7 @@ export class TargetField {
       }
     }
     this.activeCount = count;
+    this.densityApplied = candidateCells > 0 ? count / candidateCells : 0;
   }
 
   clear(): void {
@@ -389,6 +394,7 @@ export class TargetField {
     this.handsApplied = 0;
     this.handCells = 0;
     this.activeCount = 0;
+    this.densityApplied = 0;
     this.peopleCount = 0;
     this.pendingCount = 0;
     this.peopleId.fill(-1);

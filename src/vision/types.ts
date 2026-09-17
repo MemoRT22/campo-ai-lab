@@ -37,6 +37,9 @@ export interface PoseInfo {
 }
 
 export interface VisionFrame {
+  /** Tamaño real del bitmap entregado al pipeline antes del resize interno del modelo. */
+  inputWidth?: number;
+  inputHeight?: number;
   width: number;
   height: number;
   /** 0 = fondo, n = people[n − 1]. Válido sólo hasta la siguiente llamada a takeFrame(). */
@@ -85,6 +88,19 @@ export type CameraStatus =
 export type ModelStatus = 'off' | 'loading' | 'ready' | 'error';
 export type WorkerStatus = 'off' | 'starting' | 'ready' | 'busy' | 'backoff';
 
+export interface CameraDiagnostics {
+  label: string;
+  /** Índice efímero de la cámara en esta sesión. No expone el deviceId persistente. */
+  deviceIndex: number;
+  requestedWidth: number;
+  requestedHeight: number;
+  requestedFps: number;
+  deliveredWidth: number;
+  deliveredHeight: number;
+  deliveredFps: number;
+  aspectRatio: number;
+}
+
 export interface VisionStatus {
   camera: CameraStatus;
   cameraDetail: string;
@@ -97,6 +113,7 @@ export interface VisionStatus {
   consecutiveFailures: number;
   fallbackReason: string;
   cameraFps: number;
+  cameraInfo: CameraDiagnostics;
   hands: HandTrackerStatus;
 }
 
@@ -125,6 +142,17 @@ export function createVisionStatus(): VisionStatus {
     consecutiveFailures: 0,
     fallbackReason: '',
     cameraFps: 0,
+    cameraInfo: {
+      label: '',
+      deviceIndex: -1,
+      requestedWidth: 0,
+      requestedHeight: 0,
+      requestedFps: 0,
+      deliveredWidth: 0,
+      deliveredHeight: 0,
+      deliveredFps: 0,
+      aspectRatio: 0,
+    },
     hands: { state: 'off', segmentation: false, fps: 0, inferenceMs: 0, hands: 0, lastError: '' },
   };
 }

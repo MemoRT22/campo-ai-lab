@@ -39,11 +39,21 @@ const NUMBER_RULES: Record<string, NumberRule> = {
   'particles.idleParticleCount': { min: 0, max: 100000, integer: true },
   'particles.bodyParticleBudget': { min: 0, max: 100000, integer: true },
   'particles.particleSpacing': { min: 2, max: 80 },
+  'particles.particleDensity.far': { min: 0.05, max: 1 },
+  'particles.particleDensity.close': { min: 0.05, max: 1 },
+  'particles.particleSize.idle': { min: 0.2, max: 12 },
+  'particles.particleSize.far': { min: 0.2, max: 12 },
+  'particles.particleSize.close': { min: 0.2, max: 12 },
+  'particles.particleOpacity.idle': { min: 0, max: 1 },
+  'particles.particleOpacity.far': { min: 0, max: 1 },
+  'particles.particleOpacity.close': { min: 0, max: 1 },
+  'particles.edgeBrightness': { min: 0.5, max: 4 },
   'particles.cellJitter': { min: 0, max: 1 },
   'particles.silhouette.contourThreshold': { min: 0.05, max: 0.95 },
   'particles.silhouette.contourHysteresis': { min: 0, max: 0.3 },
   'particles.silhouette.edgeSnap': { min: 0, max: 1 },
   'particles.silhouette.maxSnap': { min: 0, max: 1.5 },
+  'particles.silhouette.edgeSize': { min: 0.5, max: 2 },
   'particles.particleAttraction': { min: 0, max: 2 },
   'particles.particleDamping': { min: 0.1, max: 0.99 },
   'particles.trackingAttraction': { min: 0, max: 2 },
@@ -271,6 +281,7 @@ function normalizeRect(value: NormalizedRect, fallback: NormalizedRect): Normali
 /** Última barrera antes de usar configuración: nunca deja pasar NaN, infinitos o rangos peligrosos. */
 export function validateConfig(input: Config): Config {
   const config = structuredClone(input);
+  if (config.displayProfile !== 'standard' && config.displayProfile !== 'large') config.displayProfile = defaultConfig.displayProfile;
   replaceNonFinite(config, defaultConfig);
   for (const [path, rule] of Object.entries(NUMBER_RULES)) {
     const value = get(config, path);

@@ -1,4 +1,4 @@
-import { defaultConfig, type Config } from '../config';
+import { defaultConfig, type Config, type DisplayProfile } from '../config';
 import { validateConfig } from './configValidation';
 
 const ALIASES: Record<string, string> = {
@@ -18,17 +18,36 @@ const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
  */
 export const CALIBRATION_STORAGE_KEY = 'campo:technical-calibration:v1';
 export const CALIBRATION_PATHS = new Set([
+  'displayProfile',
   'vision.maskThreshold',
+  'vision.maskHysteresis',
   'vision.minPersonArea',
   'vision.smoothingAttackMs',
   'vision.smoothingReleaseMs',
+  'vision.spatialBlurRadius',
   'vision.inferenceWidth',
   'vision.processingFPS',
   'vision.poseDetectionConfidence',
+  'camera.cameraWidth',
+  'camera.cameraHeight',
+  'camera.frameRate',
   'camera.crop',
   'typography.scale',
   'layout.sideColumnWidth',
   'particles.particleSpacing',
+  'particles.bodyParticleBudget',
+  'particles.particleDensity.far',
+  'particles.particleDensity.close',
+  'particles.particleSize.idle',
+  'particles.particleSize.far',
+  'particles.particleSize.close',
+  'particles.particleOpacity.far',
+  'particles.particleOpacity.close',
+  'particles.silhouette.contourThreshold',
+  'particles.silhouette.contourHysteresis',
+  'particles.silhouette.edgeSize',
+  'particles.edgeBrightness',
+  'particles.occlusionGraceMs',
   'particles.trackingResponseMs',
   'particles.trackingAttraction',
   'particles.trackingDamping',
@@ -40,13 +59,44 @@ export const CALIBRATION_PATHS = new Set([
   'particles.maxSpeed',
 ]);
 
+/**
+ * Preset conservador para una salida física grande. No duplica la configuración: parte de STANDARD
+ * y sólo cambia los parámetros que dependen de distancia de cámara y legibilidad del display.
+ */
+export function applyDisplayProfile(config: Config, profile: DisplayProfile): void {
+  config.displayProfile = profile;
+  if (profile !== 'large') return;
+
+  config.vision.inferenceWidth = 480;
+  config.vision.maskThreshold = 0.56;
+  config.vision.maskHysteresis = 0.22;
+  config.vision.smoothingReleaseMs = 90;
+  config.vision.minPersonArea = 0.0035;
+
+  config.particles.bodyParticleBudget = 17000;
+  config.particles.particleSpacing = 5.2;
+  config.particles.particleDensity = { far: 1, close: 1 };
+  config.particles.particleSize = { idle: 1.9, far: 2.75, close: 3.05 };
+  config.particles.particleOpacity = { idle: 0.34, far: 0.78, close: 0.95 };
+  config.particles.silhouette.contourThreshold = 0.47;
+  config.particles.silhouette.contourHysteresis = 0.08;
+  config.particles.silhouette.edgeSize = 1.12;
+  config.particles.edgeBrightness = 1.48;
+  config.particles.occlusionGraceMs = 150;
+  config.typography.scale = 1.18;
+}
+
 export function resolveConfig(search: string, storedOverrides: Record<string, unknown> | null = readCalibrationOverrides()): Config {
   const config = structuredClone(defaultConfig);
   const params = new URLSearchParams(search);
+  const storedProfile = storedOverrides?.displayProfile;
+  const requestedProfile = params.get('displayProfile') ?? (typeof storedProfile === 'string' ? storedProfile : null);
+  applyDisplayProfile(config, requestedProfile === 'large' ? 'large' : 'standard');
 
   if (storedOverrides) {
     for (const [path, value] of Object.entries(storedOverrides)) {
       if (!CALIBRATION_PATHS.has(path)) continue;
+      if (path === 'displayProfile') continue;
       applyValue(config as unknown as Record<string, unknown>, path.split('.'), value);
     }
   }

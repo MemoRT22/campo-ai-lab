@@ -55,6 +55,7 @@ export class CameraVisionSource implements VisionSource {
       this.status.cameraDetail = this.camera.detail;
       this.status.cameras = this.camera.devices;
       this.status.cameraFps = this.camera.measuredFps;
+      this.status.cameraInfo = { ...this.camera.diagnostics };
     };
   }
 
@@ -214,6 +215,8 @@ export class CameraVisionSource implements VisionSource {
         if (frame.confidenceMap && frame.confidenceMap.byteLength > 0) this.recycledConfidence = frame.confidenceMap.buffer as ArrayBuffer;
         frame.width = message.width;
         frame.height = message.height;
+        frame.inputWidth = message.inputWidth;
+        frame.inputHeight = message.inputHeight;
         frame.personMap = new Uint8Array(message.personMap);
         frame.confidenceMap = new Uint8Array(message.confidenceMap);
         frame.people = message.people;

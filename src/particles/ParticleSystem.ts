@@ -683,6 +683,7 @@ export class ParticleSystem {
         const waiting = b >= 0 || staggerSpan <= 0 ? 1 : clamp01(1 + b / staggerSpan);
         // El borde se apoya sobre el contorno subpíxel; sólo el interior conserva su desorden.
         const edge = cellEdge[c] === 1;
+        if (edge) visualSize *= s.silhouette.edgeSize;
         const cellJitter = edge ? 0 : spacing;
         let tx = cellX[c] + (field ? field.cellOffsetX[c] : 0) + jitterX[p] * cellJitter;
         let ty = cellY[c] + (field ? field.cellOffsetY[c] : 0) + jitterY[p] * cellJitter;

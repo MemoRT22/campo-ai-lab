@@ -8,6 +8,7 @@
 
 export type Delegate = 'GPU' | 'CPU';
 export type FitMode = 'cover' | 'contain';
+export type DisplayProfile = 'standard' | 'large';
 
 export interface NormalizedRect {
   x: number;
@@ -17,6 +18,8 @@ export interface NormalizedRect {
 }
 
 export const defaultConfig = {
+  /** Perfil de salida: `large` conserva la arquitectura y aplica sólo overrides de instalación. */
+  displayProfile: 'standard' as DisplayProfile,
   /** Panel técnico: cámara, máscara, cajas, FPS. Nunca activar en producción. */
   debugMode: false,
   /** Herramientas de ajuste en sitio. Implica debugMode y sólo persiste números técnicos. */
@@ -185,6 +188,8 @@ export const defaultConfig = {
       edgeSnap: 1,
       /** Desplazamiento máximo del borde hacia el contorno (fracción de particleSpacing). */
       maxSnap: 0.75,
+      /** Multiplicador de tamaño de las partículas de borde. 1 conserva el tamaño del interior. */
+      edgeSize: 1,
       /** El presupuesto nunca elimina celdas del contorno: la forma se conserva aunque el interior se aclare. */
       protectEdges: true,
     },

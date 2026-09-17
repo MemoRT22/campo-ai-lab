@@ -57,3 +57,34 @@ describe('MaskProcessor confidence output', () => {
     expect(out[5 * 10 + 2]).toBe(0);
   });
 });
+
+describe('MaskProcessor temporal continuity', () => {
+  it('conserva una extremidad perdida durante un frame pero no deja un fantasma largo', () => {
+    const config = structuredClone(defaultConfig);
+    config.vision.spatialBlurRadius = 0;
+    config.vision.smoothingAttackMs = 0;
+    config.vision.smoothingReleaseMs = 90;
+    config.vision.maskThreshold = 0.56;
+    config.vision.maskHysteresis = 0.22;
+    config.vision.presenceConfirmMs = 0;
+    config.vision.minPersonArea = 0.001;
+    const processor = new MaskProcessor(maskSettingsFrom(config));
+    const confidence = new Float32Array(20 * 10);
+    const map = new Uint8Array(confidence.length);
+
+    // Torso conectado a un brazo horizontal fino.
+    for (let y = 2; y < 9; y++) for (let x = 7; x < 13; x++) confidence[y * 20 + x] = 1;
+    for (let x = 2; x < 8; x++) confidence[4 * 20 + x] = 1;
+    processor.process(confidence, 20, 10, 0, map);
+    expect(map[4 * 20 + 3]).toBeGreaterThan(0);
+
+    // La fuente pierde el brazo durante 33 ms; el release temporal conserva su lectura.
+    for (let x = 2; x < 7; x++) confidence[4 * 20 + x] = 0;
+    processor.process(confidence, 20, 10, 33, map);
+    expect(map[4 * 20 + 3]).toBeGreaterThan(0);
+
+    // Tras varias constantes de tiempo desaparece: no queda un brazo fantasma por segundos.
+    for (let t = 66; t <= 396; t += 33) processor.process(confidence, 20, 10, t, map);
+    expect(map[4 * 20 + 3]).toBe(0);
+  });
+});

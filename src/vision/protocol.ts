@@ -32,6 +32,8 @@ export interface ReadyMessage {
 
 export interface ResultMessage {
   type: 'result';
+  inputWidth: number;
+  inputHeight: number;
   width: number;
   height: number;
   personMap: ArrayBuffer;
