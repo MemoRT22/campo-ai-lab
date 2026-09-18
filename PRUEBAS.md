@@ -183,6 +183,70 @@ http://localhost:5180/?debug=true&displayProfile=large&camera.crop={"x":0.2,"y":
 
 ---
 
+## 5b. Siluetas: limpieza y detalle
+
+El techo del detalle es el modelo, no la cámara. El segmentador por defecto
+(`selfie_segmenter_landscape`) trabaja internamente a **256×144**: una persona de pie que ocupa el
+80% del alto del encuadre se resuelve con ~115 filas de píxeles, se mire con la cámara que se mire.
+Subir resolución de cámara o `inferenceWidth` no añade ni una fila.
+
+### Probar otro modelo (lo primero si el contorno se ve basto)
+
+Están los tres en `public/models`. El cambio es sólo URL, no recompila nada, y si se ve peor se
+vuelve recargando sin el parámetro. **Es un A/B de 30 segundos; pruébalos parado a la distancia
+real.**
+
+Cuadrado en vez de apaisado — 256×256, casi el doble de filas para un cuerpo de pie:
+
+```text
+http://localhost:5180/?debug=true&displayProfile=large&vision.modelPath=models/selfie_segmenter.tflite
+```
+
+DeepLab v3 — 257×257, entrenado con escenas reales y cuerpos completos, no con selfies. Es el más
+pesado (2.8 MB, más clases): mira que `segmentación ms inf` no se dispare:
+
+```text
+http://localhost:5180/?debug=true&displayProfile=large&vision.modelPath=models/deeplab_v3.tflite
+```
+
+El de siempre, para comparar:
+
+```text
+http://localhost:5180/?debug=true&displayProfile=large
+```
+
+En la línea `modelo` del panel se ve cuál cargó y con qué etiquetas.
+
+Ninguno de los tres está entrenado para cuerpos completos a 5 m; los dos primeros son de selfie y
+videollamada. Por eso el A/B es empírico: no hay forma de predecir cuál gana en esta sala.
+
+### Ajustar el contorno por síntoma
+
+| Lo que se ve | Qué probar |
+| --- | --- |
+| Borde dentado, escalonado | `vision.spatialBlurRadius=2` |
+| Silueta hinchada, se come el fondo | `vision.maskThreshold=0.62` |
+| Faltan brazos o partes finas | `vision.maskThreshold=0.48&vision.maskHysteresis=0.14` |
+| El contorno hierve estando quieto | `vision.smoothingAttackMs=40&vision.smoothingReleaseMs=140` |
+| Se pierde detalle fino (dedos, pelo) | `vision.spatialBlurRadius=0&particles.silhouette.contourHysteresis=0.05` |
+| El borde no se pega a la forma | `particles.silhouette.contourThreshold=0.42&particles.silhouette.maxSnap=1.0` |
+
+Ejemplo de contorno más suave y estable, para leerse de lejos:
+
+```text
+http://localhost:5180/?debug=true&displayProfile=large&vision.spatialBlurRadius=2&vision.smoothingAttackMs=40&vision.smoothingReleaseMs=140
+```
+
+### Lo que gana más que cualquier parámetro
+
+1. **Acercar a la persona.** A 2 m ocupa el doble de píxeles del modelo que a 4 m. Una marca en el
+   piso resuelve el problema de raíz en vez de pelearlo.
+2. **Luz sobre la persona.** Con poca luz la imagen llega movida y con ruido, y el borde de la
+   máscara hierve. Es la causa más común de "no sale limpia".
+3. **Recortar** (sección 5): concentra los 256×144 en la zona útil.
+
+---
+
 ## 6. Densidad y rendimiento
 
 Si `densidad` va por debajo del 100% y sobra `js`, subir el presupuesto:
