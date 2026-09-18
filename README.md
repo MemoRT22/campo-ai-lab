@@ -34,6 +34,9 @@ Abre `http://localhost:5180`, permite el acceso a la cámara y colócate frente 
 
 `npm install` copia dos instancias locales del runtime WASM de MediaPipe (segmentación y Pose). Ambos modelos están incluidos en `public/models`. No se necesita internet para ejecutar.
 
+> Para calibrar en el equipo de la instalación, [`PRUEBAS.md`](PRUEBAS.md) tiene todas las URLs
+> listas para copiar y pegar, en orden, con qué mirar en cada una.
+
 ### Modos útiles
 
 | URL | Qué hace |
