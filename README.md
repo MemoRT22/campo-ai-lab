@@ -35,7 +35,8 @@ Abre `http://localhost:5180`, permite el acceso a la cámara y colócate frente 
 `npm install` copia dos instancias locales del runtime WASM de MediaPipe (segmentación y Pose). Ambos modelos están incluidos en `public/models`, junto con dos segmentadores alternativos (`selfie_segmenter` cuadrado y `deeplab_v3`) que se pueden probar sin recompilar con `?vision.modelPath=…`. No se necesita internet para ejecutar.
 
 > Para calibrar en el equipo de la instalación, [`PRUEBAS.md`](PRUEBAS.md) tiene todas las URLs
-> listas para copiar y pegar, en orden, con qué mirar en cada una.
+> listas para copiar y pegar, en orden, con qué mirar en cada una. Si se trabaja con Claude Code en
+> ese mismo equipo, [`BRIEFING.md`](BRIEFING.md) tiene el mensaje inicial que lo pone en contexto.
 
 ### Modos útiles
 
