@@ -10,6 +10,24 @@ el parámetro, vuelve el valor por defecto. Lo único que persiste es lo que se 
 
 ---
 
+## Red de seguridad — si la cámara falla
+
+Sin panel y sin cámara. Corre la coreografía completa con siluetas sintéticas: entra una persona,
+luego una segunda, luego una tercera, con modo pareja y colectivo. No depende de nada externo y no
+puede fallar. **Tenerla en una pestaña abierta el día del evento.**
+
+```text
+http://localhost:5180/?mock=true&displayProfile=large
+```
+
+La misma, con panel, para revisar que la app arranca bien antes de conectar nada:
+
+```text
+http://localhost:5180/?mock=true&debug=true&displayProfile=large
+```
+
+---
+
 ## 0. Lo primero al llegar
 
 Panel técnico con el perfil de la pared:
@@ -24,12 +42,6 @@ medir nada:
 
 ```text
 http://localhost:5180/?calibrate=true&displayProfile=large
-```
-
-Sin cámara, para comprobar que la app arranca bien:
-
-```text
-http://localhost:5180/?mock=true&debug=true&displayProfile=large
 ```
 
 ---
@@ -215,6 +227,12 @@ Con el adelanto que haya quedado bien en el paso 1, por ejemplo:
 
 ```text
 http://localhost:5180/?displayProfile=large&particles.predictionMs=110&particles.predictionMaxDistance=80&particles.trackingResponseMs=85
+```
+
+Y la de respaldo, sin cámara, por si hay que salir del paso:
+
+```text
+http://localhost:5180/?mock=true&displayProfile=large
 ```
 
 Cuando los valores estén decididos, conviene fijarlos en `src/config.ts` o en el perfil LARGE
