@@ -233,7 +233,9 @@ export class DebugPanel {
       `captura     ${status.captureFps.toFixed(1)} /s · ${status.captureMs.toFixed(1)} ms (hilo principal) · región ${(region.width * 100).toFixed(0)}×${(region.height * 100).toFixed(0)}% ${this.ctx.config.vision.cropAtCapture ? 'al capturar' : 'después de inferir'}`,
       `inferencia  input ${this.inferenceInput} · máscara ${this.maskResolution} · preset ${this.ctx.config.vision.inferenceWidth}`,
       `segmentación ${perf.segmentationFps.toFixed(1)} fps · ${perf.inferenceMs.toFixed(1)} ms inf · ${perf.maskProcessingMs.toFixed(1)} ms mask · age ${bodyAge} ms`,
-      `pose        ${status.pose.state} · ${perf.poseFps.toFixed(1)} fps · ${perf.poseInferenceMs.toFixed(1)} ms inf · age ${poseAge} ms${status.pose.lastError ? ` · ${summarize(status.pose.lastError)}` : ''}`,
+      // El ritmo lo mide el propio PoseTracker: `perf.poseFps` cuenta frames de visión que llevaban
+      // pose adjunta, así que siempre daba el mismo número que la segmentación.
+      `pose        ${status.pose.state} · ${status.pose.fps.toFixed(1)} fps · ${perf.poseInferenceMs.toFixed(1)} ms inf · age ${poseAge} ms${status.pose.lastError ? ` · ${summarize(status.pose.lastError)}` : ''}`,
       `manos       ${status.hands.state}${status.hands.segmentation ? ' + seg' : ''} · ${status.hands.fps.toFixed(1)} fps · ${status.hands.inferenceMs.toFixed(1)} ms inf · age ${handAge} ms · ${field.handsApplied}/${status.hands.hands} vistas${status.hands.lastError ? ` · ${summarize(status.hands.lastError)}` : ''}`,
       `ajustes     threshold ${this.ctx.config.vision.maskThreshold.toFixed(2)} · hysteresis ${this.ctx.config.vision.maskHysteresis.toFixed(2)} · min area ${(this.ctx.config.vision.minPersonArea * 100).toFixed(2)}%`,
       `pipeline    ${camera.captureLatencyMs.toFixed(0)} ms sensor→web · ${perf.visionLatencyMs.toFixed(0)} ms web→partículas · ≈ ${(camera.captureLatencyMs + perf.visionLatencyMs).toFixed(0)} ms (falta la pantalla)`,
