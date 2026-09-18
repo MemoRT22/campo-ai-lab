@@ -242,7 +242,10 @@ export function roiFromPose(
   const shoulders = leftShoulder && rightShoulder
     ? Math.hypot((leftShoulder.x - rightShoulder.x) * cameraWidth, (leftShoulder.y - rightShoulder.y) * cameraHeight)
     : 0;
-  const size = Math.min(settings.roiMaxPx, Math.max(settings.roiMinPx, settings.roiPalmScale * palm, settings.roiShoulderScale * shoulders));
+  // Tamaño natural antes de acotarlo: es la medida honesta de cuánta mano hay en el sensor.
+  const natural = Math.max(settings.roiPalmScale * palm, settings.roiShoulderScale * shoulders);
+  if (natural < settings.minHandPx) return null;
+  const size = Math.min(settings.roiMaxPx, Math.max(settings.roiMinPx, natural));
   // El centro de la mano está más allá de la muñeca, hacia los nudillos.
   const cx = wrist.x + (knuckleX - wrist.x) * 1.2;
   const cy = wrist.y + (knuckleY - wrist.y) * 1.2;

@@ -73,7 +73,7 @@ Todo vive en [`src/config.ts`](src/config.ts). No hay números mágicos repartid
 | `displayProfile` | Preset de salida `standard` o `large`; LARGE sólo aplica overrides puntuales sobre la misma arquitectura |
 | `camera` | Resolución, cámara, espejo, encuadre (`cover`/`contain`), recorte útil (`crop`), reintentos |
 | `vision` | FPS independientes de segmentación/Pose, ancho, `cropAtCapture`, delegado GPU/CPU, umbrales, suavizado, área mínima, `maxPeople`, watchdog y fallback |
-| `hands` | Dedos (apagados por defecto): modelo, ritmo, recortes guiados por Pose, grosor de dedos, mezcla con la máscara general y caducidad |
+| `hands` | Dedos: modelo, ritmo, recortes guiados por Pose, alcance mínimo, grosor de dedos, mezcla con la máscara general y caducidad |
 | `gestures` | Visibilidad, margen, suavizado, histéresis, tiempos mínimos y gracia de ausencia |
 | `proximity` | Qué tamaño aparente cuenta como lejos o cerca |
 | `particles` | Pool y densidad; fases de movimiento (formación, tracking, movimiento rápido, departure); predicción e interpolación; presencia magnética; idle; onda de mano; reveal y vuelo de partículas al texto y a la marca. Subsecciones `formationWow`, `livingBody` y `groupInteraction` |
@@ -170,7 +170,7 @@ Decisiones tomadas a partir de esas medidas:
 - **Ventana de interpolación adaptativa.** Entre máscaras el target avanza con la traslación estable del track. La ventana era fija (40 ms, pensada para 30 Hz): con una cámara a 8–15 fps la silueta se congelaba 60–130 ms de cada intervalo, que es exactamente la sensación de "va a escalones". Ahora la ventana es `intervalo real × interpolationIntervalFactor` (1.2), así que se ajusta sola y no cambia nada cuando la visión va a 30 Hz. Nunca extrapola más de un intervalo: un hueco mayor es pérdida de visión, no cadencia lenta.
 - **Adelanto de 50 ms en LARGE.** El resto de la latencia se compensa prediciendo (`predictionMs`), acotado por `predictionMaxDistance`. Si la silueta se adelanta al frenar, `?particles.predictionMs=30`.
 - **Pose a 10 fps en LARGE.** Alimenta gestos y nada más; a 15 fps le disputaba la GPU a la silueta.
-- **Dedos apagados por defecto.** Ver más abajo.
+- **Dedos sólo cuando hay mano que leer.** El análisis no corre si la mano es demasiado pequeña en el sensor; ver más abajo.
 
 **Alcance.** El segmentador trabaja internamente a 256×144, y eso —no la cámara— es el techo del detalle. A 5 m con una webcam de ángulo ancho una persona ocupa ~15 px de esos 256: sale un bulto. Por eso:
 
@@ -223,11 +223,11 @@ La máscara general de toda la escena no tiene resolución suficiente para un de
 4. **Dónde manda.** La mano reemplaza a la máscara general sólo alrededor de los dedos (`patchReach`, `patchFeather`); más allá —antebrazo, cuerpo— manda la máscara general, así que la mano nunca se separa del brazo. El contorno de los dedos también se ajusta con precisión subpíxel.
 5. **Nunca se congela.** Cada observación caduca sola entre `fadeStartMs` y `maxAgeMs`: si el análisis se atrasa o pierde la mano, los dedos se funden con la silueta en lugar de quedarse pegados donde estaban.
 
-**Apagados por defecto.** En la instalación real (personas a 3–8 m) el análisis costaba ~200 ms de GPU por tanda y no llegaba a pintar ni una celda de dedo, mientras le robaba frames a la silueta del cuerpo. `hands.enabled` es `false`; con público cerca se encienden con `?hands.enabled=true`.
+**Sólo cuando hay mano que leer.** Medido en la instalación con personas a 3–8 m, el análisis costaba ~250 ms de GPU por tanda y aplicaba **cero** celdas de dedo, mientras le robaba frames a la silueta. Por eso hay un alcance mínimo: si el recorte natural de la mano no llega a `minHandPx` píxeles de cámara, no se analiza y no cuesta nada. El umbral está en píxeles de sensor a propósito — con una cámara de más resolución o de ángulo más cerrado, el mismo número alcanza más lejos sin tocar nada. Cuando el presupuesto no da para todas las manos visibles, se analizan **las más grandes**, que son las que tienen dedos legibles. El panel muestra cuántas quedaron fuera (`N lejos`).
 
 **Aislado del cuerpo.** Todo esto vive en su propio worker (`hands.worker.ts`). Si se atrasa, falla o el equipo no da, la segmentación del cuerpo no pierde ni un frame; tras tres fallos seguidos los dedos se apagan por el resto de la sesión.
 
-**Alcance real.** Los dedos dependen de cuántos píxeles de cámara ocupa la mano: con 1280×720 son nítidos hasta ~1.5 m, se degradan hacia ~2.5 m y más lejos el Hand Landmarker deja de encontrar la mano (entonces la silueta vuelve al bulto de siempre). Subir `camera.cameraWidth` a 1920 amplía ese rango a costa de captura.
+**Alcance real.** Los dedos dependen de cuántos píxeles de cámara ocupa la mano: con 1280×720 son nítidos hasta ~1.5 m y se degradan hacia ~2.5 m; más allá el Hand Landmarker deja de encontrar la mano y la silueta vuelve al bulto de siempre. Subir la resolución de cámara o cerrar el ángulo amplía ese rango, y el filtro `minHandPx` se mueve con él automáticamente. Si con la cámara nueva los dedos aparecen más lejos de lo que el umbral deja pasar, se baja sin recompilar: `?hands.minHandPx=90`.
 
 ### Mirror feel: fases de movimiento
 
@@ -461,7 +461,7 @@ Pérdidas breves de detección (menos de 900 ms) no cuentan como salida. Si la p
 
 ## Verificación
 
-`npm test` (84 pruebas), `npm run typecheck` y `npm run build` validan lógica pura, contratos TypeScript y bundle de producción. Las pruebas cubren, entre otras cosas, STANDARD/LARGE y sus rangos, retención corta de extremidades sin fantasmas, traslación de la silueta al caminar sin overshoot, predicción ante brazos/frenado/giro, departure escalonado, reveal sin pérdida de tracking, elección de espacio negativo, lock de formación por persona, estela visual sin alterar el núcleo espejo, contorno subpíxel, protección del contorno ante el presupuesto, manos, recortes, la región de captura (zoom sin deformar y sin mover lo que se ve) y la ventana de interpolación (cubre el hueco real de visión y nunca extrapola más de un intervalo). La medición motion-to-photon sigue siendo una prueba física externa con video de alta velocidad.
+`npm test` (87 pruebas), `npm run typecheck` y `npm run build` validan lógica pura, contratos TypeScript y bundle de producción. Las pruebas cubren, entre otras cosas, STANDARD/LARGE y sus rangos, retención corta de extremidades sin fantasmas, traslación de la silueta al caminar sin overshoot, predicción ante brazos/frenado/giro, departure escalonado, reveal sin pérdida de tracking, elección de espacio negativo, lock de formación por persona, estela visual sin alterar el núcleo espejo, contorno subpíxel, protección del contorno ante el presupuesto, manos, recortes, la región de captura (zoom sin deformar y sin mover lo que se ve) la ventana de interpolación (cubre el hueco real de visión y nunca extrapola más de un intervalo) y el alcance mínimo de las manos (no analiza lo que no tiene dedos, y sube con la resolución de la cámara). La medición motion-to-photon sigue siendo una prueba física externa con video de alta velocidad.
 
 ## Créditos y licencias
 

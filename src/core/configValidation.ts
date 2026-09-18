@@ -218,6 +218,7 @@ const NUMBER_RULES: Record<string, NumberRule> = {
   'hands.roiMinPx': { min: 16, max: 2000 },
   'hands.roiMaxPx': { min: 32, max: 4000 },
   'hands.roiHandScale': { min: 1, max: 6 },
+  'hands.minHandPx': { min: 0, max: 2000 },
   'hands.trackReuseMs': { min: 0, max: 2000 },
   'hands.minWristVisibility': { min: 0, max: 1 },
   'hands.detectionConfidence': { min: 0, max: 1 },

@@ -13,6 +13,8 @@ const MAX_FAILURES = 3;
 interface PendingCrop {
   roi: NormalizedRect;
   personId: number;
+  /** Alto del recorte en px de cámara: prioriza las manos que de verdad tienen dedos que leer. */
+  size: number;
 }
 
 /**
@@ -81,16 +83,28 @@ export class HandTracker {
     const region = captureRegion(this.config);
     const regionWidth = region.width * videoWidth;
     const regionHeight = region.height * videoHeight;
-    const crops: PendingCrop[] = [];
+    const candidates: PendingCrop[] = [];
+    let tooFar = 0;
     for (const pose of poses) {
       for (const side of SIDES) {
-        if (crops.length >= Math.min(settings.maxHands, MAX_HANDS)) break;
-        const roi = this.resolveRoi(pose, side, now, regionWidth, regionHeight);
-        if (!roi) continue;
         const wrist = pose.landmarks[side === 'left' ? 15 : 16];
-        crops.push({ roi: { ...roi }, personId: this.personAt(wrist.x, wrist.y, people, personMap, maskWidth, maskHeight) });
+        const roi = this.resolveRoi(pose, side, now, regionWidth, regionHeight);
+        if (!roi) {
+          // Muñeca visible pero sin recorte: la mano es demasiado pequeña para tener dedos.
+          if (wrist && wrist.visibility >= settings.minWristVisibility) tooFar++;
+          continue;
+        }
+        candidates.push({
+          roi: { ...roi },
+          personId: this.personAt(wrist.x, wrist.y, people, personMap, maskWidth, maskHeight),
+          size: roi.height * regionHeight,
+        });
       }
     }
+    this.status.tooFar = tooFar;
+    // Con presupuesto para pocas manos, analizar las más grandes: son las que dan dedos legibles.
+    if (candidates.length > 1) candidates.sort((a, b) => b.size - a.size);
+    const crops = candidates.slice(0, Math.min(settings.maxHands, MAX_HANDS));
     if (crops.length === 0) {
       if (this.observations.length > 0 && now - this.lastResultAt > settings.maxAgeMs) this.observations = [];
       return;

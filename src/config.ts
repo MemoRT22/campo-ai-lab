@@ -97,12 +97,7 @@ export const defaultConfig = {
    * Corre en su propio worker: si se atrasa, la silueta del cuerpo no pierde ni un frame.
    */
   hands: {
-    /**
-     * Apagado por defecto: en la instalación real (personas a 3–8 m) el análisis costaba ~200 ms de
-     * GPU por tanda y no llegaba a pintar ni una celda de dedo, mientras robaba frames al cuerpo.
-     * Encender sólo con público cerca: `?hands.enabled=true`.
-     */
-    enabled: false,
+    enabled: true,
     modelPath: 'models/hand_landmarker.task',
     /** Frecuencia máxima del análisis; sólo corre cuando Pose ve una muñeca. */
     fps: 20,
@@ -117,6 +112,13 @@ export const defaultConfig = {
     roiMaxPx: 420,
     /** Recorte guiado por los 21 puntos de la observación anterior, más preciso que Pose. */
     roiHandScale: 1.9,
+    /**
+     * Tamaño natural mínimo del recorte, en píxeles de cámara, para que valga la pena analizar la
+     * mano. Por debajo no hay dedos que encontrar y el análisis sólo le quitaría GPU al cuerpo:
+     * en la instalación, con personas a 3–8 m, costaba ~250 ms por tanda y aplicaba cero celdas.
+     * Está en píxeles de cámara a propósito: con una cámara mejor, el mismo umbral alcanza más lejos.
+     */
+    minHandPx: 120,
     /** Tiempo durante el que una observación previa sirve para encuadrar la siguiente. */
     trackReuseMs: 200,
     minWristVisibility: 0.4,

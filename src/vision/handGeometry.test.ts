@@ -133,3 +133,35 @@ describe('recortes de mano', () => {
     [0.2, 0.1, 0.6, 0.3, 0.4, 0.2].forEach((value, i) => expect(mapped[i]).toBeCloseTo(value, 5));
   });
 });
+
+describe('alcance de las manos', () => {
+  const out = { x: 0, y: 0, width: 1, height: 1 };
+  /** Pose con la mano y los hombros escalados: simula a la persona alejándose de la cámara. */
+  function personAt(scale: number) {
+    return pose({
+      15: { x: 0.5, y: 0.5 },
+      17: { x: 0.5 + 0.02 * scale, y: 0.5 - 0.04 * scale },
+      19: { x: 0.5 + 0.03 * scale, y: 0.5 - 0.05 * scale },
+      11: { x: 0.5 - 0.1 * scale, y: 0.6 },
+      12: { x: 0.5 + 0.1 * scale, y: 0.6 },
+    });
+  }
+
+  it('no analiza una mano demasiado pequeña para tener dedos', () => {
+    // Persona lejana: la mano no llega al mínimo, así que no se gasta GPU en ella.
+    expect(roiFromPose(personAt(0.2), 'left', 1280, 720, SETTINGS, out)).toBeNull();
+  });
+
+  it('sí analiza la misma mano de cerca', () => {
+    const roi = roiFromPose(personAt(1), 'left', 1280, 720, SETTINGS, out);
+    expect(roi).not.toBeNull();
+    expect(roi!.height * 720).toBeGreaterThanOrEqual(SETTINGS.minHandPx);
+  });
+
+  it('el umbral está en píxeles de cámara: una cámara mejor alcanza más lejos', () => {
+    const far = personAt(0.45);
+    // Mismo encuadre y misma distancia, sólo más resolución de sensor.
+    expect(roiFromPose(far, 'left', 1280, 720, SETTINGS, out)).toBeNull();
+    expect(roiFromPose(far, 'left', 3840, 2160, SETTINGS, out)).not.toBeNull();
+  });
+});

@@ -75,6 +75,8 @@ export interface TrackerStatus {
 export interface HandTrackerStatus extends TrackerStatus {
   segmentation: boolean;
   hands: number;
+  /** Manos visibles que quedaron fuera de alcance: demasiado pequeñas para tener dedos. */
+  tooFar: number;
 }
 
 export type PoseTrackerStatus = TrackerStatus;
@@ -172,6 +174,6 @@ export function createVisionStatus(): VisionStatus {
       captureLatencyMs: 0,
     },
     pose: { state: 'off', fps: 0, inferenceMs: 0, lastError: '' },
-    hands: { state: 'off', segmentation: false, fps: 0, inferenceMs: 0, hands: 0, lastError: '' },
+    hands: { state: 'off', segmentation: false, fps: 0, inferenceMs: 0, hands: 0, tooFar: 0, lastError: '' },
   };
 }
