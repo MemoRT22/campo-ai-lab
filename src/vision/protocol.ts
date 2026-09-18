@@ -16,6 +16,7 @@ export interface FrameMessage {
   timestamp: number;
   /** Buffer de un personMap anterior que el worker puede reutilizar. */
   recycled: ArrayBuffer | null;
+  recycledConfidence: ArrayBuffer | null;
 }
 
 export type ToWorker = InitMessage | FrameMessage;
@@ -28,9 +29,12 @@ export interface ReadyMessage {
 
 export interface ResultMessage {
   type: 'result';
+  inputWidth: number;
+  inputHeight: number;
   width: number;
   height: number;
   personMap: ArrayBuffer;
+  confidenceMap: ArrayBuffer;
   people: PersonInfo[];
   timestamp: number;
   inferenceMs: number;
@@ -40,6 +44,7 @@ export interface ResultMessage {
 export interface SkippedMessage {
   type: 'skipped';
   recycled: ArrayBuffer | null;
+  recycledConfidence: ArrayBuffer | null;
 }
 
 export interface ErrorMessage {

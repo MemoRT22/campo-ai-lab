@@ -1,9 +1,10 @@
 import { MaskProcessor } from './MaskProcessor';
 import { PersonSegmenter } from './PersonSegmenter';
 import type { FrameMessage, FromWorker, InitMessage, ToWorker } from './protocol';
+import type { PersonInfo } from './types';
 
-// Todo lo que toca píxeles de la cámara vive aquí. Los frames se cierran al terminar
-// y sólo sale del worker el mapa de siluetas: ninguna imagen se conserva ni se envía.
+// Todo lo que toca píxeles de la cámara vive aquí. Los frames se cierran al terminar;
+// sólo salen la máscara, cajas y landmarks transitorios: ninguna imagen se conserva.
 
 const segmenter = new PersonSegmenter();
 let processor: MaskProcessor | null = null;
@@ -24,39 +25,60 @@ async function init(message: InitMessage): Promise<void> {
     ready = true;
     post({ type: 'ready', delegate: segmenter.delegate, labels: segmenter.labels });
   } catch (error) {
-    post({ type: 'error', fatal: true, duringInit: true, message: `No se pudo iniciar el segmentador (${message.delegate}): ${describe(error)}` });
+    post({ type: 'error', fatal: true, duringInit: true, message: `No se pudo iniciar visión (${message.delegate}): ${describe(error)}` });
   }
 }
 
 function handleFrame(message: FrameMessage): void {
-  const { bitmap, timestamp, recycled } = message;
+  const { bitmap, timestamp, recycled, recycledConfidence } = message;
+  const inputWidth = bitmap.width;
+  const inputHeight = bitmap.height;
   let produced = false;
 
   try {
     if (ready && processor) {
       const mask = processor;
       const started = performance.now();
-      segmenter.segment(bitmap, timestamp, (confidence, width, height) => {
-        const inferenceMs = performance.now() - started;
+      let width = 0;
+      let height = 0;
+      const output: { personMap: Uint8Array | null; confidenceMap: Uint8Array | null } = { personMap: null, confidenceMap: null };
+      let people: PersonInfo[] = [];
+      let inferenceMs = 0;
+      let processingMs = 0;
+      segmenter.segment(bitmap, timestamp, (confidence, maskWidth, maskHeight) => {
+        inferenceMs = performance.now() - started;
+        width = maskWidth;
+        height = maskHeight;
         const size = width * height;
-        const personMap = recycled && recycled.byteLength === size ? new Uint8Array(recycled) : new Uint8Array(size);
+        output.personMap = recycled && recycled.byteLength === size ? new Uint8Array(recycled) : new Uint8Array(size);
+        output.confidenceMap = recycledConfidence && recycledConfidence.byteLength === size ? new Uint8Array(recycledConfidence) : new Uint8Array(size);
         const processingStarted = performance.now();
-        const people = mask.process(confidence, width, height, timestamp, personMap);
-        const processingMs = performance.now() - processingStarted;
-        produced = true;
-        post(
-          { type: 'result', width, height, personMap: personMap.buffer, people, timestamp, inferenceMs, processingMs },
-          [personMap.buffer],
-        );
+        people = mask.process(confidence, width, height, timestamp, output.personMap, output.confidenceMap);
+        processingMs = performance.now() - processingStarted;
       });
+      const { personMap, confidenceMap } = output;
+      if (personMap && confidenceMap) {
+        produced = true;
+        const personMapBuffer = personMap.buffer as ArrayBuffer;
+        const confidenceBuffer = confidenceMap.buffer as ArrayBuffer;
+        post(
+          { type: 'result', inputWidth, inputHeight, width, height, personMap: personMapBuffer, confidenceMap: confidenceBuffer, people, timestamp, inferenceMs, processingMs },
+          [personMapBuffer, confidenceBuffer],
+        );
+      }
     }
   } catch (error) {
-    post({ type: 'error', fatal: false, duringInit: false, message: `Fallo de inferencia: ${describe(error)}` });
+    post({ type: 'error', fatal: false, duringInit: false, message: `Fallo del pipeline de visión: ${describe(error)}` });
   } finally {
     bitmap.close();
   }
 
-  if (!produced) post({ type: 'skipped', recycled }, recycled ? [recycled] : []);
+  if (!produced) {
+    const transfer: ArrayBuffer[] = [];
+    if (recycled) transfer.push(recycled);
+    if (recycledConfidence) transfer.push(recycledConfidence);
+    post({ type: 'skipped', recycled, recycledConfidence }, transfer);
+  }
 }
 
 self.addEventListener('message', (event: MessageEvent<ToWorker>) => {

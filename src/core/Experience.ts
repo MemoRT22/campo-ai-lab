@@ -1,8 +1,7 @@
 import type { Config } from '../config';
 import type { GestureEvent } from '../interaction/GestureEvents';
-import type { BrandOverlay } from '../ui/BrandOverlay';
-import type { InstructionOverlay } from '../ui/InstructionOverlay';
-import type { PrivacyNotice } from '../ui/PrivacyNotice';
+import type { BrandPlacement } from '../ui/BrandOverlay';
+import type { InstructionMessage } from '../ui/InstructionOverlay';
 import { StateMachine } from './StateMachine';
 
 export type ExperienceState = 'idle' | 'presence' | 'departure';
@@ -15,6 +14,24 @@ interface Session {
   secondHint: boolean;
   revealAt: number;
   brandShown: boolean;
+}
+
+export interface ExperienceOverlay {
+  readonly activeId: string | null;
+  show(message: InstructionMessage, now: number): boolean;
+  hide(id: string | null, now: number): void;
+  update(now: number): void;
+}
+
+export interface ExperienceBrand {
+  show(now: number, durationMs: number, placement: BrandPlacement): void;
+  hide(): void;
+  update(now: number): void;
+}
+
+export interface ExperiencePrivacy {
+  request(now: number, delayMs: number): void;
+  update(now: number): void;
 }
 
 const ID = {
@@ -41,24 +58,24 @@ export class Experience {
   private readonly machine: StateMachine<ExperienceState>;
   private people = 0;
   private absentSince = -1;
-  private idlePromptShown = false;
+  private nextIdlePromptAt = 0;
   private session: Session | null = null;
   private lastDepartureAt = -Infinity;
 
   constructor(
     private readonly config: Config,
-    private readonly overlay: InstructionOverlay,
-    private readonly brand: BrandOverlay,
-    private readonly privacy: PrivacyNotice,
+    private readonly overlay: ExperienceOverlay,
+    private readonly brand: ExperienceBrand,
+    private readonly privacy: ExperiencePrivacy,
     now: number,
   ) {
     this.machine = new StateMachine<ExperienceState>(
       {
         idle: {
-          enter: () => {
-            this.idlePromptShown = false;
+          enter: (t) => {
+            this.nextIdlePromptAt = t + this.config.experience.idlePromptDelayMs;
           },
-          update: (t, elapsed) => this.updateIdle(t, elapsed),
+          update: (t) => this.updateIdle(t),
           exit: (t) => this.overlay.hide(ID.idle, t),
         },
         presence: {
@@ -97,12 +114,12 @@ export class Experience {
     if (this.machine.current !== 'presence' || !session) return;
     const { texts, experience } = this.config;
 
-    if (event.type === 'hand-raised' && session.gestureOneAt < 0) {
+    if (event.type === 'ONE_HAND_UP' && session.gestureOneAt < 0) {
       session.gestureOneAt = now;
       this.overlay.hide(ID.raiseHand, now);
     }
 
-    if (event.type === 'both-hands-raised' && (session.revealAt < 0 || now - session.revealAt > experience.revealDurationMs)) {
+    if (event.type === 'BOTH_HANDS_UP' && session.revealAt < 0) {
       session.revealAt = now;
       session.secondHint = true;
       if (session.gestureOneAt < 0) session.gestureOneAt = now;
@@ -112,26 +129,37 @@ export class Experience {
           id: ID.reveal,
           message: texts.revealTitle,
           subMessage: texts.revealSubtitle,
-          placement: 'center',
+          placement: 'auto',
+          kind: 'title',
           variant: 'title',
           timeout: experience.revealDurationMs,
           priority: PRIORITY.reveal,
           opacity: 0.92,
+          appearAt: now + experience.revealTextDelayMs,
         },
         now,
       );
     }
   }
 
-  private updateIdle(now: number, elapsed: number): void {
+  private updateIdle(now: number): void {
     if (this.people > 0) {
       this.machine.transition('presence', now);
       return;
     }
-    if (!this.idlePromptShown && elapsed > this.config.experience.idlePromptDelayMs) {
-      this.idlePromptShown = true;
+    // ACÉRCATE respira: aparece, se desvanece y vuelve después de un silencio.
+    if (now >= this.nextIdlePromptAt) {
+      this.nextIdlePromptAt = now + this.config.experience.idlePromptIntervalMs;
       this.overlay.show(
-        { id: ID.idle, message: this.config.texts.idlePrompt, placement: 'center', variant: 'prompt', priority: PRIORITY.idle, opacity: 0.62 },
+        {
+          id: ID.idle,
+          message: this.config.texts.idlePrompt,
+          placement: 'center',
+          variant: 'prompt',
+          timeout: this.config.experience.idlePromptDurationMs,
+          priority: PRIORITY.idle,
+          opacity: 0.46,
+        },
         now,
       );
     }
@@ -165,7 +193,16 @@ export class Experience {
       session.greeted = true;
       if (experience.showDetectedMessage) {
         this.overlay.show(
-          { id: ID.greeting, message: texts.detected, placement: 'lower', timeout: experience.greetingDurationMs, priority: PRIORITY.greeting },
+          {
+            id: ID.greeting,
+            message: texts.detected,
+            placement: 'auto',
+            kind: 'message',
+            variant: 'message',
+            timeout: experience.greetingDurationMs,
+            priority: PRIORITY.greeting,
+            opacity: 0.66,
+          },
           now,
         );
       }
@@ -174,7 +211,7 @@ export class Experience {
     if (!session.firstHint && t > experience.firstInstructionDelayMs) {
       session.firstHint = true;
       if (session.gestureOneAt < 0) this.overlay.show(
-        { id: ID.raiseHand, message: texts.raiseHand, icon: 'raise-hand', placement: 'lower', timeout: experience.instructionTimeout, priority: PRIORITY.hint },
+        { id: ID.raiseHand, message: texts.raiseHand, icon: 'raise-hand', placement: 'auto', kind: 'hint', timeout: experience.instructionTimeout, priority: PRIORITY.hint },
         now,
       );
     }
@@ -182,17 +219,19 @@ export class Experience {
     if (session.gestureOneAt >= 0 && !session.secondHint && now - session.gestureOneAt > experience.secondInstructionDelayMs) {
       session.secondHint = true;
       this.overlay.show(
-        { id: ID.tryBoth, message: texts.tryBoth, icon: 'raise-hand', placement: 'lower', timeout: experience.instructionTimeout, priority: PRIORITY.hint },
+        { id: ID.tryBoth, message: texts.tryBoth, icon: 'raise-hand', placement: 'auto', kind: 'hint', timeout: experience.instructionTimeout, priority: PRIORITY.hint },
         now,
       );
     }
 
     if (branding.showBranding && !session.brandShown) {
-      const afterReveal = session.revealAt >= 0 && now - session.revealAt > experience.revealDurationMs + experience.brandAfterRevealMs;
+      // La marca espera a que el reveal empiece a desvanecerse: nunca comparten espacio al mismo tiempo.
+      const afterReveal = session.revealAt >= 0 && now - session.revealAt > experience.revealDurationMs + experience.brandAfterRevealMs &&
+        this.overlay.activeId !== ID.reveal;
       const afterLongStay = t > experience.brandAfterPresenceMs && this.overlay.activeId === null;
       if (afterReveal || afterLongStay) {
         session.brandShown = true;
-        this.brand.show(now, experience.brandDurationMs, 'lower');
+        this.brand.show(now, experience.brandDurationMs, 'auto');
       }
     }
   }

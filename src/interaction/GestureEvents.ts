@@ -1,11 +1,10 @@
 /**
  * Contrato entre reconocimiento de gestos y reacción visual.
  *
- * Fase 4: un GestureRecognizer basado en pose landmarks emitirá estos eventos.
- * Mientras tanto, el modo debug los simula con las teclas 1 y 2.
+ * GestureRecognizer los emite desde Pose; debug también puede simularlos con 1 y 2.
  */
 
-export type GestureType = 'hand-raised' | 'both-hands-raised';
+export type GestureType = 'ONE_HAND_UP' | 'BOTH_HANDS_UP';
 
 export interface GesturePoint {
   /** Coordenadas normalizadas en el espacio de la cámara, igual que PersonInfo. */
@@ -19,5 +18,6 @@ export interface GestureEvent {
   personId: number;
   points: GesturePoint[];
   timestamp: number;
+  confidence: number;
   source: 'pose' | 'simulated';
 }

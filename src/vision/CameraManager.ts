@@ -1,7 +1,9 @@
 import type { Config } from '../config';
-import type { CameraStatus } from './types';
+import type { CameraDiagnostics, CameraStatus } from './types';
 
 type CameraSettings = Config['camera'];
+
+const LATENCY_SMOOTHING = 0.1;
 
 interface Classified {
   status: CameraStatus;
@@ -34,7 +36,15 @@ export class CameraManager {
   status: CameraStatus = 'idle';
   detail = '';
   devices: string[] = [];
+  measuredFps = 0;
+  readonly diagnostics: CameraDiagnostics;
   onStatusChange: (() => void) | null = null;
+  /**
+   * Se dispara en cuanto el navegador presenta un frame nuevo, antes del siguiente
+   * requestAnimationFrame. Capturar aquí quita hasta un frame de espera y, sobre todo, el jitter
+   * de que la cámara y la pantalla vayan a ritmos distintos.
+   */
+  onNewFrame: ((now: number) => void) | null = null;
 
   private stream: MediaStream | null = null;
   private retryAttempt = 0;
@@ -43,8 +53,24 @@ export class CameraManager {
   private stopped = true;
   private lastVideoTime = -1;
   private lastAdvanceAt = 0;
+  private fpsWindowAt = 0;
+  private fpsFrames = 0;
+  private videoFrameCallback = 0;
+  private cameraIds: string[] = [];
 
   constructor(private readonly settings: CameraSettings) {
+    this.diagnostics = {
+      label: '',
+      deviceIndex: -1,
+      requestedWidth: settings.cameraWidth,
+      requestedHeight: settings.cameraHeight,
+      requestedFps: settings.frameRate,
+      deliveredWidth: 0,
+      deliveredHeight: 0,
+      deliveredFps: 0,
+      aspectRatio: 0,
+      captureLatencyMs: 0,
+    };
     const video = document.createElement('video');
     video.muted = true;
     video.playsInline = true;
@@ -77,6 +103,19 @@ export class CameraManager {
     if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 && time !== this.lastVideoTime) {
       this.lastVideoTime = time;
       this.lastAdvanceAt = now;
+      // Fallback para navegadores sin requestVideoFrameCallback. En navegadores modernos el
+      // monitor independiente mide todos los frames, no sólo los capturados para inferencia.
+      if (!('requestVideoFrameCallback' in video)) {
+        this.fpsFrames++;
+        if (this.fpsWindowAt === 0) this.fpsWindowAt = now;
+        const elapsed = now - this.fpsWindowAt;
+        if (elapsed >= 1000) {
+          this.measuredFps = (this.fpsFrames * 1000) / elapsed;
+          this.fpsFrames = 0;
+          this.fpsWindowAt = now;
+          this.onStatusChange?.();
+        }
+      }
       return true;
     }
     if (now - this.lastAdvanceAt > this.settings.frozenFrameTimeoutMs) {
@@ -113,10 +152,21 @@ export class CameraManager {
       this.retryAttempt = 0;
       this.lastVideoTime = -1;
       this.lastAdvanceAt = performance.now();
+      this.fpsWindowAt = 0;
+      this.fpsFrames = 0;
 
       const track = stream.getVideoTracks()[0];
       const s = track.getSettings();
+      this.diagnostics.label = track.label;
+      this.diagnostics.deviceIndex = this.cameraIds.indexOf(s.deviceId ?? '');
+      this.diagnostics.deliveredWidth = s.width ?? this.video.videoWidth;
+      this.diagnostics.deliveredHeight = s.height ?? this.video.videoHeight;
+      this.diagnostics.deliveredFps = s.frameRate ?? 0;
+      this.diagnostics.aspectRatio = s.aspectRatio ?? (
+        this.diagnostics.deliveredHeight > 0 ? this.diagnostics.deliveredWidth / this.diagnostics.deliveredHeight : 0
+      );
       this.setStatus('live', `${track.label} · ${s.width}×${s.height} @ ${Math.round(s.frameRate ?? 0)} fps`);
+      this.startFrameMonitor();
     } catch (error) {
       this.release();
       this.fail(classify(error));
@@ -140,6 +190,7 @@ export class CameraManager {
 
   private async findPreferredDevice(): Promise<string | null> {
     const cameras = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+    this.cameraIds = cameras.map((d) => d.deviceId);
     this.devices = cameras.map((d, i) => `${i}: ${d.label || `cámara ${i}`}`);
 
     const { deviceLabel, deviceIndex } = this.settings;
@@ -162,6 +213,10 @@ export class CameraManager {
   }
 
   private release(): void {
+    if (this.videoFrameCallback && 'cancelVideoFrameCallback' in this.video) {
+      this.video.cancelVideoFrameCallback(this.videoFrameCallback);
+    }
+    this.videoFrameCallback = 0;
     if (this.stream) {
       for (const track of this.stream.getTracks()) {
         track.removeEventListener('ended', this.handleTrackEnded);
@@ -170,6 +225,40 @@ export class CameraManager {
     }
     this.stream = null;
     this.video.srcObject = null;
+    this.measuredFps = 0;
+    this.diagnostics.deliveredWidth = 0;
+    this.diagnostics.deliveredHeight = 0;
+    this.diagnostics.deliveredFps = 0;
+    this.diagnostics.aspectRatio = 0;
+  }
+
+  /** Mide frames realmente entregados por el elemento de video, independiente del ritmo de inferencia. */
+  private startFrameMonitor(): void {
+    if (!('requestVideoFrameCallback' in this.video)) return;
+    const onFrame: VideoFrameRequestCallback = (now, metadata) => {
+      if (this.status !== 'live') return;
+      this.lastAdvanceAt = now;
+      this.fpsFrames++;
+      // Sensor → navegador. Chrome lo entrega para streams de getUserMedia.
+      const capturedAt = metadata.captureTime;
+      if (typeof capturedAt === 'number' && capturedAt > 0) {
+        const latency = now - capturedAt;
+        if (latency >= 0 && latency < 1000) {
+          this.diagnostics.captureLatencyMs += (latency - this.diagnostics.captureLatencyMs) * LATENCY_SMOOTHING;
+        }
+      }
+      if (this.fpsWindowAt === 0) this.fpsWindowAt = now;
+      const elapsed = now - this.fpsWindowAt;
+      if (elapsed >= 1000) {
+        this.measuredFps = (this.fpsFrames * 1000) / elapsed;
+        this.fpsFrames = 0;
+        this.fpsWindowAt = now;
+        this.onStatusChange?.();
+      }
+      this.videoFrameCallback = this.video.requestVideoFrameCallback(onFrame);
+      this.onNewFrame?.(now);
+    };
+    this.videoFrameCallback = this.video.requestVideoFrameCallback(onFrame);
   }
 
   private handleTrackEnded = (): void => {

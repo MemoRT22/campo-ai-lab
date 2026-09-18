@@ -1,13 +1,19 @@
 import type { Config } from '../config';
 import { InteractionManager } from '../interaction/InteractionManager';
+import { GestureRecognizer } from '../interaction/GestureRecognizer';
+import { GroupInteraction } from '../particles/GroupInteraction';
 import { ParticleSystem } from '../particles/ParticleSystem';
 import { TargetField } from '../particles/TargetField';
 import { Renderer } from '../render/Renderer';
 import { BrandOverlay } from '../ui/BrandOverlay';
+import { CalibrationPanel } from '../ui/CalibrationPanel';
 import { DebugPanel } from '../ui/DebugPanel';
 import { InstructionOverlay } from '../ui/InstructionOverlay';
+import { NegativeSpaceLayout } from '../ui/NegativeSpaceLayout';
 import { PrivacyNotice } from '../ui/PrivacyNotice';
+import { brandBlock, revealBlock, sampleTypeBlock, type TypeViewport } from '../ui/TextParticleSampler';
 import { setupKiosk } from '../utils/Kiosk';
+import { screenScale } from '../utils/MathUtils';
 import { PerformanceMonitor } from '../utils/PerformanceMonitor';
 import { CameraVisionSource } from '../vision/CameraVisionSource';
 import { MockVisionSource } from '../vision/MockVisionSource';
@@ -26,8 +32,11 @@ export class App {
   private readonly renderer: Renderer;
   private readonly field: TargetField;
   private readonly particles: ParticleSystem;
+  private readonly group: GroupInteraction;
   private readonly experience: Experience;
   private readonly interaction: InteractionManager;
+  private readonly gestures: GestureRecognizer;
+  private readonly layout: NegativeSpaceLayout;
   private readonly source: VisionSource;
   private readonly perf = new PerformanceMonitor();
   private readonly debug: DebugPanel | null = null;
@@ -45,12 +54,42 @@ export class App {
     this.renderer = new Renderer(canvas, config.render, config.particles.particleCount);
     this.field = new TargetField(config);
     this.particles = new ParticleSystem(config.particles);
-    const overlay = new InstructionOverlay(overlayRoot);
-    const brand = new BrandOverlay(overlayRoot, config.branding);
+    this.group = new GroupInteraction(config.particles.groupInteraction);
+    this.particles.setGroup(this.group);
+    this.layout = new NegativeSpaceLayout(config.layout);
+    const resolvePlacement = this.layout.resolve.bind(this.layout);
+    const overlay = new InstructionOverlay(overlayRoot, resolvePlacement, config.typography.scale);
+    const brand = new BrandOverlay(overlayRoot, config.branding, resolvePlacement, config.typography.scale);
     const privacy = new PrivacyNotice(overlayRoot, config.privacy, config.texts.privacy);
     this.experience = new Experience(config, overlay, brand, privacy, now);
-    this.interaction = new InteractionManager(config, this.particles, this.field, this.experience);
+    this.interaction = new InteractionManager(config, this.particles, this.field, this.experience, this.group);
+    this.gestures = new GestureRecognizer(config.gestures);
     this.source = config.mockVision ? new MockVisionSource(config) : new CameraVisionSource(config);
+
+    // Las partículas del reveal y de la marca apuntan al lugar donde el texto realmente apareció.
+    const p = config.particles;
+    overlay.onRender = (message, anchor, now) => {
+      if (message.variant !== 'title' || !anchor) return;
+      const viewport = this.viewport();
+      const block = revealBlock(message.message, message.subMessage ?? '', anchor.width, viewport);
+      this.particles.startTextFlight(sampleTypeBlock(block, anchor.x, anchor.y, p.textParticleMaxTargets, viewport), now, {
+        startAt: Math.max(now, this.particles.celebrationPeakAt),
+        travelMs: p.revealTravelMs,
+        holdMs: p.revealHoldMs,
+        returnMs: p.revealReturnMs,
+      });
+    };
+    brand.onShow = (anchor, now, durationMs) => {
+      if (!anchor || this.experience.state !== 'presence') return;
+      const viewport = this.viewport();
+      const block = brandBlock(config.branding.brandName, config.branding.labName, anchor.width, viewport);
+      this.particles.startTextFlight(sampleTypeBlock(block, anchor.x, anchor.y, p.textParticleMaxTargets, viewport), now, {
+        startAt: now,
+        travelMs: p.brandTravelMs,
+        holdMs: Math.max(0, durationMs - p.brandTravelMs - p.brandReturnMs),
+        returnMs: p.brandReturnMs,
+      });
+    };
 
     this.experience.onStateChange = (from, to) => {
       if (to === 'idle') this.idleSince = performance.now();
@@ -65,9 +104,14 @@ export class App {
         particles: this.particles,
         experience: this.experience,
         interaction: this.interaction,
+        gestures: this.gestures,
+        field: this.field,
+        group: this.group,
+        layout: this.layout,
         errors: this.errors,
       });
     }
+    if (config.calibrationMode) new CalibrationPanel(overlayRoot, config);
   }
 
   start(): void {
@@ -100,16 +144,24 @@ export class App {
       const frame = this.source.takeFrame();
       if (frame) {
         this.field.update(frame, now);
+        this.layout.update(this.field, now);
         this.particles.applyTargets(this.field, now);
         this.perf.recordVision(frame.inferenceMs, frame.processingMs, frame.timestamp, now);
+        if (frame.poseTimestamp !== null) {
+          for (const event of this.gestures.update(frame.poses, frame.people, frame.poseTimestamp)) this.interaction.handle(event, now);
+          this.perf.recordPose(frame.poseInferenceMs, frame.poseTimestamp, now);
+        }
         this.debug?.drawFrame(frame);
       } else if ((this.field.activeCount > 0 || this.field.peopleCount > 0) && now - this.source.lastFrameAt > this.config.vision.staleFrameMs) {
         // Visión detenida: no dejar una silueta congelada en pantalla.
         this.field.clear();
+        this.layout.update(this.field, now);
         this.particles.applyTargets(this.field, now);
+        this.gestures.reset();
       }
 
       this.experience.update(now, this.field.peopleCount);
+      this.group.update(this.field, now, screenScale(this.field.width, this.field.height));
 
       this.particles.step(dt, now);
       this.renderer.draw(this.particles.renderData, this.particles.renderCount);
@@ -126,13 +178,19 @@ export class App {
     const height = window.innerHeight;
     this.renderer.resize(width, height, window.devicePixelRatio || 1);
     this.field.resize(width, height);
+    this.layout.update(this.field, performance.now());
     this.particles.resize(width, height);
   };
 
+  private viewport(): TypeViewport {
+    return { width: window.innerWidth, height: window.innerHeight, typographyScale: this.config.typography.scale };
+  }
+
   private readonly handleDebugKey = (event: KeyboardEvent): void => {
     const now = performance.now();
-    if (event.key === '1') this.interaction.simulate('hand-raised', now);
-    else if (event.key === '2') this.interaction.simulate('both-hands-raised', now);
+    if (event.key === '1') this.interaction.simulate('ONE_HAND_UP', now);
+    else if (event.key === '2') this.interaction.simulate('BOTH_HANDS_UP', now);
+    else if (event.key === '3') this.interaction.simulateGroupWave(now);
     else if (event.key === 'd' || event.key === 'D') this.debug?.toggle();
   };
 

@@ -3,16 +3,20 @@ const EMA = 0.15;
 
 export class PerformanceMonitor {
   renderFps = 0;
-  visionFps = 0;
+  segmentationFps = 0;
+  poseFps = 0;
   /** Tiempo de JS por frame en el hilo principal (simulación + subida de buffers). */
   frameMs = 0;
   inferenceMs = 0;
+  poseInferenceMs = 0;
   maskProcessingMs = 0;
   /** Desde la captura del frame de cámara hasta que llega el resultado al hilo principal. */
   visionLatencyMs = 0;
+  poseLatencyMs = 0;
 
   private frames = 0;
   private visionFrames = 0;
+  private poseFrames = 0;
   private windowStart = 0;
   private frameStart = 0;
 
@@ -23,9 +27,11 @@ export class PerformanceMonitor {
     const elapsed = now - this.windowStart;
     if (elapsed >= WINDOW_MS) {
       this.renderFps = (this.frames * 1000) / elapsed;
-      this.visionFps = (this.visionFrames * 1000) / elapsed;
+      this.segmentationFps = (this.visionFrames * 1000) / elapsed;
+      this.poseFps = (this.poseFrames * 1000) / elapsed;
       this.frames = 0;
       this.visionFrames = 0;
+      this.poseFrames = 0;
       this.windowStart = now;
     }
   }
@@ -40,4 +46,11 @@ export class PerformanceMonitor {
     this.maskProcessingMs += (processingMs - this.maskProcessingMs) * EMA;
     this.visionLatencyMs += (now - captureTime - this.visionLatencyMs) * EMA;
   }
+
+  recordPose(inferenceMs: number, captureTime: number, now: number): void {
+    this.poseFrames++;
+    this.poseInferenceMs += (inferenceMs - this.poseInferenceMs) * EMA;
+    this.poseLatencyMs += (now - captureTime - this.poseLatencyMs) * EMA;
+  }
 }
+
