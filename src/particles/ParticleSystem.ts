@@ -510,8 +510,11 @@ export class ParticleSystem {
     if (field) {
       // Entre frames de visión (30 Hz) el target avanza con la traslación estable del track:
       // evita que las partículas avancen a escalones sin extrapolar más de un intervalo.
-      const sinceVision = Math.min(Math.max(0, now - field.lastVisionAt), s.interpolationMaxMs);
-      const maxInterpolation = s.predictionMaxDistance * scale;
+      // La ventana cubre el hueco real entre frames de visión: si la cámara va a 8 fps, el target
+      // sigue avanzando esos 125 ms en vez de congelarse tras los primeros 40.
+      const window = s.interpolationMaxMs > 0 ? Math.max(s.interpolationMaxMs, field.visionIntervalMs * s.interpolationIntervalFactor) : 0;
+      const sinceVision = Math.min(Math.max(0, now - field.lastVisionAt), window);
+      const maxInterpolation = s.interpolationMaxDistance * scale;
       for (let k = 0; k < field.peopleCount; k++) {
         this.personFastBlend[k] = speedFastBlend(field.peopleSpeed[k], s, scale);
         let ix = field.peopleInterpolationVx[k] * sinceVision;

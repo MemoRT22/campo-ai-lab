@@ -3,6 +3,9 @@ import { clamp01, createRandom, expAlpha, lerp, screenScale, smoothstep } from '
 import { HandShape, MAX_HANDS, handAnchor, sampleUint8, type HandObservation } from '../vision/handGeometry';
 import type { PersonInfo, VisionFrame } from '../vision/types';
 
+const VISION_INTERVAL_SMOOTHING = 0.2;
+/** Un hueco mayor que esto es una pérdida de visión, no una cadencia lenta. */
+const VISION_INTERVAL_MAX_MS = 400;
 const BAYER_4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
 /** Coseno a partir del cual la dirección se considera plenamente sostenida. */
 const FULL_CONFIDENCE_COSINE = 0.95;
@@ -114,6 +117,12 @@ export class TargetField {
   readonly pendingY: Float32Array;
   /** Momento del último frame de visión aplicado (performance.now()). */
   lastVisionAt = 0;
+  /**
+   * Intervalo real entre frames de visión. No es un dato de diagnóstico: la interpolación lo usa
+   * para saber cuánto hueco tiene que cubrir. Con una cámara a 8 fps el hueco es de 125 ms, y una
+   * ventana fija de 40 ms dejaría la silueta congelada el resto del intervalo.
+   */
+  visionIntervalMs = 0;
   /** Copia de la última detección para mapear gestos. */
   readonly lastPeople: PersonInfo[] = [];
 
@@ -262,6 +271,10 @@ export class TargetField {
     this.ensureMapping(frame.width, frame.height);
     const dt = this.lastUpdate === 0 ? 33 : now - this.lastUpdate;
     this.lastUpdate = now;
+    if (this.lastVisionAt > 0) {
+      const gap = Math.min(VISION_INTERVAL_MAX_MS, Math.max(0, now - this.lastVisionAt));
+      this.visionIntervalMs = this.visionIntervalMs > 0 ? this.visionIntervalMs + (gap - this.visionIntervalMs) * VISION_INTERVAL_SMOOTHING : gap;
+    }
     this.lastVisionAt = now;
 
     const { slotKeep, slotProximity, slotCount, slotSumX, slotSumY } = this;

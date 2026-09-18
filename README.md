@@ -129,6 +129,7 @@ El mismo panel ofrece presets de solicitud 1280/1920/3840, 720/1080/2160 y 30/60
 | --- | --- | --- |
 | Visión | width 480; threshold 0.56; hysteresis 0.22; release 90 ms; min area 0.15%; poseFPS 10 | Más señal débil y una pérdida aislada tolerada, sin fantasmas largos; Pose sólo alimenta gestos y no le disputa la GPU a la silueta |
 | Densidad | spacing 5.2; BODY budget 19 000; far/close 1.0 | No adelgazar a la persona lejana; multipersona sigue limitado por presupuesto |
+| Latencia | prediction 50 ms; max 40 px | La pared es grande y la cámara está lejos: el adelanto en píxeles crece con ellas |
 | Punto | idle 1.9; far 2.75; close 3.05 | Más presencia en LED sin volver la silueta sólida |
 | Contorno | threshold 0.47; hysteresis 0.08; size ×1.12; brightness ×1.48 | Cabeza, hombros y extremidades legibles sin dibujar un outline |
 | Continuidad | occlusion grace 150 ms | BODY→BODY y `personId` se conservan durante omisiones breves |
@@ -158,12 +159,16 @@ Tres cosas distintas se confunden en "va lagueado". El panel las separa:
 | `cámara N fps medidos` | Frames que la webcam entrega de verdad | Menos de 25–30 es un problema de cámara, no de código: normalmente poca luz (el autoexposure alarga la exposición) o un modo de captura lento |
 | `captura N /s · X ms` | Coste del hilo principal por pedir el frame a la cámara | Si sube, el `render fps` baja aunque los modelos estén libres |
 | `segmentación N fps · X ms` | Ritmo e inferencia de la silueta | Es el ritmo real del espejo |
-| `pipeline X ms` | Cámara → frame BODY dibujado | La latencia que se percibe como retraso |
+| `pipeline A ms sensor→web · B ms web→partículas` | A: exposición, USB y buffers del driver (lo reporta la propia cámara). B: captura → partículas dibujadas | Si A es grande, el retraso está antes de que el código vea nada |
+| `interpolación cada N ms · ventana W ms` | Hueco real entre máscaras y cuánto lo cubre la interpolación | Si `N` ≫ 33, el espejo avanza a saltos de N ms; la ventana debe cubrirlo |
 | `render N fps · js X ms` | Dibujo y simulación | `js` alto con `captura` baja = demasiadas partículas |
 
 Decisiones tomadas a partir de esas medidas:
 
 - **Una sola captura por tick.** Cuerpo y Pose comparten el mismo `ImageBitmap`; sólo se copia el bitmap ya reducido cuando toca frame de Pose. Decodificar el video dos veces por tick era el trabajo más caro del hilo principal.
+- **Capturar en cuanto llega el frame.** La captura la dispara `requestVideoFrameCallback`, no el `requestAnimationFrame` siguiente. Quita hasta un frame de espera y, sobre todo, el jitter de que cámara y pantalla vayan a ritmos distintos (el `rAF` queda de red de seguridad y no captura dos veces el mismo frame).
+- **Ventana de interpolación adaptativa.** Entre máscaras el target avanza con la traslación estable del track. La ventana era fija (40 ms, pensada para 30 Hz): con una cámara a 8–15 fps la silueta se congelaba 60–130 ms de cada intervalo, que es exactamente la sensación de "va a escalones". Ahora la ventana es `intervalo real × interpolationIntervalFactor` (1.2), así que se ajusta sola y no cambia nada cuando la visión va a 30 Hz. Nunca extrapola más de un intervalo: un hueco mayor es pérdida de visión, no cadencia lenta.
+- **Adelanto de 50 ms en LARGE.** El resto de la latencia se compensa prediciendo (`predictionMs`), acotado por `predictionMaxDistance`. Si la silueta se adelanta al frenar, `?particles.predictionMs=30`.
 - **Pose a 10 fps en LARGE.** Alimenta gestos y nada más; a 15 fps le disputaba la GPU a la silueta.
 - **Dedos apagados por defecto.** Ver más abajo.
 
@@ -178,6 +183,18 @@ Decisiones tomadas a partir de esas medidas:
 ```
 
 En hardware: lo que amplía el alcance no son megapíxeles sino **ángulo de visión más cerrado** (la persona ocupa más de esos 256×144) y **luz** (a 30 fps reales, no 15). `?mock=true` desactiva `cropAtCapture`: no hay cámara que recortar.
+
+### Ajustes del equipo (Linux)
+
+La latencia que el código no puede tocar está en la cámara, en el compositor y en la pared LED. Por orden de impacto medido:
+
+1. **Cámara a 30 fps reales.** `v4l2-ctl -d /dev/video0 --list-formats-ext` dice qué modos existen y a qué ritmo; muchos webcams sólo dan 30 fps en MJPG. Con poca luz el autoexposure baja sola a 15 fps: `v4l2-ctl -d /dev/video0 -c auto_exposure=1 -c exposure_time_absolute=...` la fija. Se comprueba en `cámara N fps medidos`.
+2. **Sin "Force Full Composition Pipeline" en NVIDIA.** Se suele activar para quitar tearing y añade un frame entero. `nvidia-settings` → X Server Display Configuration → Advanced.
+3. **Pantalla completa real.** Un compositor de escritorio añade otro frame; en pantalla completa suele desactivarse solo. Chrome en `--kiosk` y sin barras.
+4. **Comprobar `chrome://gpu`.** Rasterización y decodificación de video por hardware activas; si no, se paga en CPU.
+5. **La pared LED también tarda.** Los procesadores/scalers añaden 1–3 frames y muchos traen un modo de baja latencia. Es la parte que `pipeline` no puede medir.
+
+**Hardware.** 16 GB de RAM y una RTX 2070 Super sobran: el segmentador ocupa milisegundos de GPU y la simulación es de un solo hilo. Lo único que puede justificar una compra es la webcam, y por FPS estables en poca luz y ángulo de visión, no por megapíxeles.
 
 ### Detalle de silueta
 
@@ -444,7 +461,7 @@ Pérdidas breves de detección (menos de 900 ms) no cuentan como salida. Si la p
 
 ## Verificación
 
-`npm test` (81 pruebas), `npm run typecheck` y `npm run build` validan lógica pura, contratos TypeScript y bundle de producción. Las pruebas cubren, entre otras cosas, STANDARD/LARGE y sus rangos, retención corta de extremidades sin fantasmas, traslación de la silueta al caminar sin overshoot, predicción ante brazos/frenado/giro, departure escalonado, reveal sin pérdida de tracking, elección de espacio negativo, lock de formación por persona, estela visual sin alterar el núcleo espejo, contorno subpíxel, protección del contorno ante el presupuesto, manos, recortes y la región de captura (zoom sin deformar y sin mover lo que se ve). La medición motion-to-photon sigue siendo una prueba física externa con video de alta velocidad.
+`npm test` (84 pruebas), `npm run typecheck` y `npm run build` validan lógica pura, contratos TypeScript y bundle de producción. Las pruebas cubren, entre otras cosas, STANDARD/LARGE y sus rangos, retención corta de extremidades sin fantasmas, traslación de la silueta al caminar sin overshoot, predicción ante brazos/frenado/giro, departure escalonado, reveal sin pérdida de tracking, elección de espacio negativo, lock de formación por persona, estela visual sin alterar el núcleo espejo, contorno subpíxel, protección del contorno ante el presupuesto, manos, recortes, la región de captura (zoom sin deformar y sin mover lo que se ve) y la ventana de interpolación (cubre el hueco real de visión y nunca extrapola más de un intervalo). La medición motion-to-photon sigue siendo una prueba física externa con video de alta velocidad.
 
 ## Créditos y licencias
 

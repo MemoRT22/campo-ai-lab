@@ -66,6 +66,11 @@ export class PoseTracker {
     return now - this.lastRequestAt >= 1000 / this.config.vision.poseFPS - 4;
   }
 
+  /** Marca que ya hay una captura en camino para pose, antes de que el bitmap exista. */
+  reserve(now: number): void {
+    this.lastRequestAt = now;
+  }
+
   /** Toma la propiedad del bitmap: lo transfiere al worker o lo cierra. */
   submit(bitmap: ImageBitmap, now: number): void {
     const worker = this.worker;

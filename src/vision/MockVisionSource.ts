@@ -256,6 +256,7 @@ export class MockVisionSource implements VisionSource {
       deliveredHeight: HEIGHT,
       deliveredFps: config.vision.processingFPS,
       aspectRatio: WIDTH / HEIGHT,
+      captureLatencyMs: 0,
     };
     this.status.model = 'ready';
   }

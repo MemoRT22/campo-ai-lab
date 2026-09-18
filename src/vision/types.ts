@@ -104,6 +104,11 @@ export interface CameraDiagnostics {
   deliveredHeight: number;
   deliveredFps: number;
   aspectRatio: number;
+  /**
+   * Del sensor al navegador: exposición, USB y buffers del driver. No se puede bajar desde el
+   * código; si es alta, el retraso está antes de que la web vea nada.
+   */
+  captureLatencyMs: number;
 }
 
 export interface VisionStatus {
@@ -164,6 +169,7 @@ export function createVisionStatus(): VisionStatus {
       deliveredHeight: 0,
       deliveredFps: 0,
       aspectRatio: 0,
+      captureLatencyMs: 0,
     },
     pose: { state: 'off', fps: 0, inferenceMs: 0, lastError: '' },
     hands: { state: 'off', segmentation: false, fps: 0, inferenceMs: 0, hands: 0, lastError: '' },

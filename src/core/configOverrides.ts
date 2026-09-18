@@ -58,6 +58,7 @@ export const CALIBRATION_PATHS = new Set([
   'particles.interpolationMaxMs',
   'particles.predictionMs',
   'particles.predictionMaxDistance',
+  'particles.interpolationIntervalFactor',
   'particles.maxSpeed',
 ]);
 
@@ -77,6 +78,10 @@ export function applyDisplayProfile(config: Config, profile: DisplayProfile): vo
   config.vision.minPersonArea = 0.0015;
   // Pose sólo alimenta los gestos; bajarla deja la GPU para la silueta, que es lo que se ve.
   config.vision.poseFPS = 10;
+
+  // La pared es grande y la cámara está lejos: el adelanto en px tiene que crecer con ella.
+  config.particles.predictionMs = 50;
+  config.particles.predictionMaxDistance = 40;
 
   config.particles.bodyParticleBudget = 19000;
   config.particles.particleSpacing = 5.2;

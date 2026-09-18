@@ -325,8 +325,16 @@ export const defaultConfig = {
     predictionVerticalFactor: 0.35,
     /** El adelanto crece con esta constante de tiempo y se reduce de inmediato. */
     predictionRiseMs: 90,
-    /** Avance del target entre frames de visión (30 Hz → 60 Hz). 0 desactiva. */
+    /** Avance mínimo del target entre frames de visión (30 Hz → 60 Hz). 0 desactiva. */
     interpolationMaxMs: 40,
+    /**
+     * La ventana de interpolación se adapta al ritmo real de la visión: `intervalo × factor`.
+     * Con una cámara lenta (8–15 fps) una ventana fija congelaba la silueta entre frames, que es
+     * la causa de que el espejo se vea a escalones aunque el render vaya a 60. 0 desactiva.
+     */
+    interpolationIntervalFactor: 1.2,
+    /** Tope de seguridad del avance interpolado (px a escala de referencia). */
+    interpolationMaxDistance: 90,
 
     /* DEPARTURE — la presencia se disuelve. */
     /** Tolera una pérdida aislada de segmentación sin dispersar el cuerpo. */

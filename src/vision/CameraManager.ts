@@ -3,6 +3,8 @@ import type { CameraDiagnostics, CameraStatus } from './types';
 
 type CameraSettings = Config['camera'];
 
+const LATENCY_SMOOTHING = 0.1;
+
 interface Classified {
   status: CameraStatus;
   message: string;
@@ -37,6 +39,12 @@ export class CameraManager {
   measuredFps = 0;
   readonly diagnostics: CameraDiagnostics;
   onStatusChange: (() => void) | null = null;
+  /**
+   * Se dispara en cuanto el navegador presenta un frame nuevo, antes del siguiente
+   * requestAnimationFrame. Capturar aquí quita hasta un frame de espera y, sobre todo, el jitter
+   * de que la cámara y la pantalla vayan a ritmos distintos.
+   */
+  onNewFrame: ((now: number) => void) | null = null;
 
   private stream: MediaStream | null = null;
   private retryAttempt = 0;
@@ -61,6 +69,7 @@ export class CameraManager {
       deliveredHeight: 0,
       deliveredFps: 0,
       aspectRatio: 0,
+      captureLatencyMs: 0,
     };
     const video = document.createElement('video');
     video.muted = true;
@@ -226,10 +235,18 @@ export class CameraManager {
   /** Mide frames realmente entregados por el elemento de video, independiente del ritmo de inferencia. */
   private startFrameMonitor(): void {
     if (!('requestVideoFrameCallback' in this.video)) return;
-    const onFrame: VideoFrameRequestCallback = (now) => {
+    const onFrame: VideoFrameRequestCallback = (now, metadata) => {
       if (this.status !== 'live') return;
       this.lastAdvanceAt = now;
       this.fpsFrames++;
+      // Sensor → navegador. Chrome lo entrega para streams de getUserMedia.
+      const capturedAt = metadata.captureTime;
+      if (typeof capturedAt === 'number' && capturedAt > 0) {
+        const latency = now - capturedAt;
+        if (latency >= 0 && latency < 1000) {
+          this.diagnostics.captureLatencyMs += (latency - this.diagnostics.captureLatencyMs) * LATENCY_SMOOTHING;
+        }
+      }
       if (this.fpsWindowAt === 0) this.fpsWindowAt = now;
       const elapsed = now - this.fpsWindowAt;
       if (elapsed >= 1000) {
@@ -239,6 +256,7 @@ export class CameraManager {
         this.onStatusChange?.();
       }
       this.videoFrameCallback = this.video.requestVideoFrameCallback(onFrame);
+      this.onNewFrame?.(now);
     };
     this.videoFrameCallback = this.video.requestVideoFrameCallback(onFrame);
   }

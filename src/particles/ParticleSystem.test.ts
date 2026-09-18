@@ -612,3 +612,63 @@ describe('ParticleSystem group bridges', () => {
     expect(maxBridge).toBeGreaterThan(0);
   });
 });
+
+describe('ParticleSystem interpolación entre frames de visión', () => {
+  /** Distancia media al target tras `elapsed` ms sin frame de visión, con las partículas fijas. */
+  function targetAdvance(factor: number, elapsed: number): number {
+    const config = structuredClone(defaultConfig);
+    config.particles.particleCount = 400;
+    config.particles.bodyParticleBudget = 400;
+    config.particles.idleParticleCount = 0;
+    config.particles.particleSpacing = 12;
+    config.particles.particleNoise = 0;
+    config.particles.cellJitter = 0;
+    config.particles.predictionMs = 0;
+    config.particles.interpolationMaxMs = 40;
+    config.particles.interpolationIntervalFactor = factor;
+    const field = new TargetField(config);
+    const system = new ParticleSystem(config.particles);
+    field.resize(1920, 1080);
+    system.resize(1920, 1080);
+
+    activateRectangle(field, 9, 4, 12, 4, 16);
+    // La cámara entrega un frame cada 120 ms: el hueco que la interpolación tiene que cubrir.
+    field.visionIntervalMs = 120;
+    field.peopleInterpolationVx[0] = 0.5;
+    field.peopleInterpolationVy[0] = 0;
+    system.applyTargets(field, 1000);
+    field.lastVisionAt = 1000;
+
+    const state = internals(system);
+    for (let p = 0; p < system.capacity; p++) {
+      if (state.mode[p] !== BODY) continue;
+      state.bond[p] = 1;
+      state.life[p] = 1;
+      state.px[p] = field.cellX[state.cell[p]];
+      state.py[p] = field.cellY[state.cell[p]];
+      state.vx[p] = 0;
+      state.vy[p] = 0;
+    }
+    // dt = 0: las partículas no se mueven, así que la distancia al target es el avance interpolado.
+    system.step(0, 1000 + elapsed);
+    return system.averageTargetDistance;
+  }
+
+  it('sigue avanzando durante todo el hueco cuando la visión va lenta', () => {
+    const fixed = targetAdvance(0, 110);
+    const adaptive = targetAdvance(1.2, 110);
+    // Ventana fija: el target se congela a los 40 ms (0.5 px/ms × 40).
+    expect(fixed).toBeCloseTo(20, 0);
+    // Ventana adaptada al intervalo real (120 ms × 1.2 = 144): cubre los 110 ms completos.
+    expect(adaptive).toBeCloseTo(55, 0);
+  });
+
+  it('no extrapola más allá de un intervalo de visión', () => {
+    // 300 ms sin frame es pérdida de visión, no cadencia lenta: el avance se detiene en la ventana.
+    expect(targetAdvance(1.2, 300)).toBeCloseTo(72, 0);
+  });
+
+  it('0 desactiva la adaptación sin tocar el resto', () => {
+    expect(targetAdvance(0, 30)).toBeCloseTo(15, 0);
+  });
+});

@@ -73,6 +73,7 @@ export class CameraVisionSource implements VisionSource {
 
   start(): void {
     this.running = true;
+    this.camera.onNewFrame = (now) => this.maybeCapture(now);
     this.camera.start();
     this.spawnWorker();
     this.pose.start();
@@ -81,6 +82,7 @@ export class CameraVisionSource implements VisionSource {
 
   stop(): void {
     this.running = false;
+    this.camera.onNewFrame = null;
     this.hands.stop();
     this.pose.stop();
     this.camera.stop();
@@ -105,11 +107,19 @@ export class CameraVisionSource implements VisionSource {
       this.restartWorker('El worker de visión dejó de responder');
     }
 
+    // Red de seguridad: normalmente captura `onNewFrame`, antes de este rAF. `pollFrame` evita
+    // que el mismo frame de video se capture dos veces.
+    this.maybeCapture(now);
+  }
+
+  /** Captura si hay frame nuevo y alguien lo quiere. Idempotente por frame de video. */
+  private maybeCapture(now: number): void {
+    if (!this.running) return;
     // Pose no depende del worker del cuerpo: si éste se cae, los gestos siguen vivos.
     const forBody = this.worker !== null && this.workerReady && !this.inFlight;
     const forPose = this.pose.wantsFrame(now);
     if (!forBody && !forPose) return;
-    // Tolerancia de 4 ms para no perder capturas por desalineación con requestAnimationFrame.
+    // Tolerancia de 4 ms para no perder capturas por desalineación con el reloj de la cámara.
     if (now - this.lastCaptureAt < 1000 / this.config.vision.processingFPS - 4) return;
     if (!this.camera.pollFrame(now)) return;
     this.capture(now, forBody, forPose);
@@ -142,6 +152,7 @@ export class CameraVisionSource implements VisionSource {
       this.sentAt = now;
     }
     this.lastCaptureAt = now;
+    if (forPose) this.pose.reserve(now);
     const requestedAt = performance.now();
 
     createImageBitmap(video, sx, sy, sw, sh, { resizeWidth: width, resizeHeight: height, resizeQuality: 'low' })
