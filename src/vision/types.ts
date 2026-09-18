@@ -126,7 +126,11 @@ export interface VisionStatus {
   fallbackReason: string;
   cameraFps: number;
   cameraInfo: CameraDiagnostics;
-  /** Milisegundos entre pedir el bitmap de la cámara y recibirlo. Es coste del hilo principal. */
+  /**
+   * Milisegundos entre pedir el bitmap de la cámara y recibirlo. No es tiempo de hilo principal
+   * bloqueado: es lo que tarda el navegador en entregar el frame reducido, y entra entero en la
+   * latencia del espejo. Con un capturador USB que comprime, aquí se ve.
+   */
   captureMs: number;
   /** Capturas por segundo realmente enviadas a los modelos. */
   captureFps: number;

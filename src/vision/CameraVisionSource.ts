@@ -155,7 +155,14 @@ export class CameraVisionSource implements VisionSource {
     if (forPose) this.pose.reserve(now);
     const requestedAt = performance.now();
 
-    createImageBitmap(video, sx, sy, sw, sh, { resizeWidth: width, resizeHeight: height, resizeQuality: 'low' })
+    // Sin recorte, la forma corta: pedir un rectángulo del video activa una ruta más lenta en
+    // algunos drivers, y la mayoría de las instalaciones usan el encuadre completo.
+    const options: ImageBitmapOptions = { resizeWidth: width, resizeHeight: height, resizeQuality: 'low' };
+    const source = region.width >= 1 && region.height >= 1
+      ? createImageBitmap(video, options)
+      : createImageBitmap(video, sx, sy, sw, sh, options);
+
+    source
       .then(async (bitmap) => {
         this.recordCapture(requestedAt);
         const usable = worker !== null && worker === this.worker && this.workerReady;

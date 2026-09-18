@@ -10,6 +10,7 @@ import type { NegativeSpaceLayout } from './NegativeSpaceLayout';
 import type { VisionFrame, VisionSource } from '../vision/types';
 
 const TEXT_INTERVAL_MS = 250;
+const PREVIEW_INTERVAL_MS = 110;
 const SLOT_TONES = [
   [236, 236, 236],
   [150, 200, 255],
@@ -64,6 +65,7 @@ export class DebugPanel {
   private readonly maskCtx: CanvasRenderingContext2D;
   private imageData: ImageData | null = null;
   private lastTextAt = 0;
+  private lastPreviewAt = 0;
   private lastFrame: VisionFrame | null = null;
   private latestPoses: VisionFrame['poses'] = [];
   private inferenceInput = '—';
@@ -104,13 +106,18 @@ export class DebugPanel {
   drawFrame(frame: VisionFrame): void {
     this.lastFrame = frame;
     if (this.el.hidden) return;
-    this.drawCamera();
     const { width, height, personMap, people } = frame;
     this.inferenceInput = `${frame.inputWidth ?? this.ctx.config.vision.inferenceWidth}×${frame.inputHeight ?? '—'}`;
     this.maskResolution = `${width}×${height}`;
     this.peopleSummary = people.length
       ? people.map((person) => `#${person.id} area ${(person.area * 100).toFixed(2)}% · prox ${person.proximity.toFixed(2)}`).join(' | ')
       : '—';
+    // Pintar el video y la máscara cuesta milisegundos reales: a 30 fps de visión el propio panel
+    // falsearía el `js` que se está midiendo. Las miniaturas van a su ritmo, los números al suyo.
+    const now = performance.now();
+    if (now - this.lastPreviewAt < PREVIEW_INTERVAL_MS) return;
+    this.lastPreviewAt = now;
+    this.drawCamera();
     const mirror = this.ctx.config.camera.mirror;
     if (this.maskCanvas.width !== width || this.maskCanvas.height !== height || !this.imageData) {
       this.maskCanvas.width = width;
@@ -230,7 +237,7 @@ export class DebugPanel {
       `cámara      ${status.cameraFps.toFixed(1)} fps medidos · ${status.camera}`,
       `captura req ${camera.requestedWidth}×${camera.requestedHeight} @ ${camera.requestedFps} · entregada ${camera.deliveredWidth || '—'}×${camera.deliveredHeight || '—'} @ ${camera.deliveredFps ? camera.deliveredFps.toFixed(0) : '—'}`,
       `dispositivo ${camera.deviceIndex >= 0 ? `#${camera.deviceIndex}` : '—'} · ${camera.label || status.cameraDetail || '—'} · aspect ${camera.aspectRatio ? camera.aspectRatio.toFixed(3) : '—'}`,
-      `captura     ${status.captureFps.toFixed(1)} /s · ${status.captureMs.toFixed(1)} ms (hilo principal) · región ${(region.width * 100).toFixed(0)}×${(region.height * 100).toFixed(0)}% ${this.ctx.config.vision.cropAtCapture ? 'al capturar' : 'después de inferir'}`,
+      `captura     ${status.captureFps.toFixed(1)} /s · ${status.captureMs.toFixed(1)} ms por frame · región ${(region.width * 100).toFixed(0)}×${(region.height * 100).toFixed(0)}% ${this.ctx.config.vision.cropAtCapture ? 'al capturar' : 'después de inferir'}`,
       `inferencia  input ${this.inferenceInput} · máscara ${this.maskResolution} · preset ${this.ctx.config.vision.inferenceWidth}`,
       `segmentación ${perf.segmentationFps.toFixed(1)} fps · ${perf.inferenceMs.toFixed(1)} ms inf · ${perf.maskProcessingMs.toFixed(1)} ms mask · age ${bodyAge} ms`,
       // El ritmo lo mide el propio PoseTracker: `perf.poseFps` cuenta frames de visión que llevaban
